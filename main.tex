@@ -1,0 +1,75 @@
+% ============================================================================
+% main.tex — Documento maestro del Manual Técnico Avanzado
+% Orquestación de Datos, MLOps y LLMOps: Apache Airflow y MLflow
+% ============================================================================
+\documentclass[10pt,a4paper,oneside]{book}
+
+\input{preamble}
+
+\begin{document}
+
+% ----------------------------------------------------------------------------
+% Portada, Prefacio e Índices
+% ----------------------------------------------------------------------------
+\frontmatter
+
+\input{chapters/00_prefacio}
+
+\cleardoublepage
+\phantomsection
+\pdfbookmark[0]{Índice General}{toc}
+\tableofcontents
+
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{Índice de Figuras}
+\listoffigures
+
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{Índice de Tablas}
+\listoftables
+
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{Índice de Listados de Código}
+\renewcommand{\lstlistlistingname}{Índice de Listados de Código}
+\lstlistoflistings
+
+% ----------------------------------------------------------------------------
+% Cuerpo principal del manual
+% ----------------------------------------------------------------------------
+\mainmatter
+
+\part{Fundamentos de Orquestación de Datos}
+\input{chapters/01_fundamentos_orquestacion}
+
+\part{Apache Airflow: Arquitectura, Diseño de DAGs y Airflow 3}
+\input{chapters/02_airflow_arquitectura_v3}
+\input{chapters/03_airflow_dags_patrones}
+
+\part{Conectividad y Conectores en Apache Airflow}
+\input{chapters/04_airflow_conectividad_arquitectura}
+\input{chapters/05_airflow_conectores_catalogo}
+
+\part{MLOps y MLflow Clásico: Del Experimento a Producción}
+\input{chapters/06_mlops_ciclo_vida}
+\input{chapters/07_mlflow_clasico}
+
+\part{Modernización LLMOps: Prompt Engineering, LLMs y Agentes con MLflow 3}
+\input{chapters/08_mlflow_prompt_engineering}
+\input{chapters/09_mlflow_llms_agentes_gateway}
+
+\part{Arquitecturas End-to-End: Apache Airflow + MLflow en Producción}
+\input{chapters/10_integracion_airflow_mlflow}
+
+% ----------------------------------------------------------------------------
+% Apéndices y Material de Referencia
+% ----------------------------------------------------------------------------
+\appendix
+\part{Apéndices y Referencia Rápida}
+\input{chapters/A_cheatsheet}
+\input{chapters/B_glosario}
+\input{chapters/C_bibliografia}
+
+\end{document}

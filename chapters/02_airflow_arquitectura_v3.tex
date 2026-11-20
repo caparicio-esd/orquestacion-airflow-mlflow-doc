@@ -1,0 +1,680 @@
+% ============================================================================
+% 02_airflow_arquitectura_v3.tex
+% Capítulo 2: Arquitectura de Apache Airflow y Evolución hacia Airflow 3
+% ============================================================================
+
+\chapter{Arquitectura de Apache Airflow y Evolución hacia Airflow 3}\label{chap:airflow-arquitectura}
+\chaptermark{Arquitectura de Airflow y Airflow 3}
+
+Comprender Apache Airflow desde el punto de vista de un usuario que escribe pequeños scripts en local es sencillo; operarlo con fiabilidad cuando cientos de equipos despliegan miles de pipelines diarios con dependencias cruzadas, requisitos estrictos de seguridad y ventanas SLA exige conocer con precisión su anatomía interna. En los últimos años, además, Airflow ha protagonizado la transformación arquitectónica más profunda de toda su historia con el salto de la rama madura \textbf{2.10.x} a \textbf{Apache Airflow 3.0+} (2025--2026).
+
+Este capítulo descompone en primer lugar los procesos, colas y bases de datos de la arquitectura clásica de Airflow 2.10, ya que sigue ampliamente desplegada en producción y sienta las bases conceptuales del sistema. A continuación se analizan en detalle los distintos ejecutores y mecanismos de control de concurrencia, se recorre el camino completo desde la instalación en un entorno virtual local hasta el despliegue productivo en Docker Compose y Kubernetes con Helm, y finalmente se estudia en profundidad la nueva arquitectura cliente-servidor de Airflow 3.0+ junto con una guía práctica de migración.
+
+% ============================================================================
+\section{Anatomía interna de Apache Airflow 2.10}\label{sec:anatomia-airflow-2}
+% ============================================================================
+
+Apache Airflow no es un binario monolítico, sino un conjunto coordinado de servicios desacoplados que comparten el estado global del sistema a través de una base de datos relacional. En la serie 2.10, la arquitectura se compone de siete piezas fundamentales cuyo papel conviene dominar con precisión.
+
+\subsection{Componentes del plano de control y del plano de ejecución}\label{subsec:componentes-airflow-2}
+
+\begin{description}
+  \item[Metadata Database:] es la única fuente de verdad transaccional del clúster. Almacena las definiciones serializadas de los DAGs, el historial de ejecuciones (\code{DagRun} y \code{TaskInstance}), los mensajes XCom, las conexiones cifradas (\code{Connection}), las variables (\code{Variable}), los \textit{Pools}, los eventos de \textit{Datasets}, los registros de auditoría y los bloqueos de coordinación. En producción debe utilizarse \textbf{PostgreSQL} (opción recomendada por la comunidad por su excelente soporte de bloqueos de fila y rendimiento concurrente) o MySQL~8.
+
+  Aunque en las pruebas iniciales Airflow crea por defecto una base de datos \textbf{SQLite}, esta \textbf{solo sirve para desarrollo local uniproceso}: SQLite bloquea el fichero completo ante cada escritura concurrente, impide ejecutar tareas en paralelo reales y es incompatible con \code{LocalExecutor}, \code{CeleryExecutor} y \code{KubernetesExecutor}. En clústeres medianos y grandes es igualmente crítico interponer un multiplexador de conexiones como \pkg{PgBouncer}, ya que múltiples procesos abren sesiones frecuentes contra PostgreSQL.
+
+  \item[Scheduler:] constituye el cerebro del plano de control. Ejecuta un bucle continuo (\textit{scheduling loop}) que inspecciona los DAGs registrados en la Metadata Database, evalúa qué \code{DagRuns} deben crearse según sus calendarios (\code{Timetables}) o \textit{Datasets}, comprueba qué tareas tienen todas sus dependencias aguas arriba satisfechas y las envía al \textbf{Executor}. Asimismo, monitoriza los latidos periódicos (\textit{heartbeats}) de las tareas en ejecución para detectar y limpiar tareas huérfanas o bloqueadas (\textit{zombie tasks}). Desde Airflow 2.0 soporta \textbf{alta disponibilidad activo-activo} (múltiples instancias de Scheduler simultáneas) apoyándose en bloqueos pesimistas a nivel de fila (\code{SELECT ... FOR UPDATE SKIP LOCKED} en PostgreSQL) para evitar que dos planificadores despachen la misma tarea dos veces.
+
+  \item[DAG File Processor:] tradicionalmente embebido dentro del Scheduler, en instalaciones profesionales de Airflow 2.x se despliega como un proceso independiente (\code{airflow dag-processor}). Su misión es recorrer periódicamente la carpeta \code{dags/} (controlado por \code{dag\_dir\_list\_interval} y \code{min\_file\_process\_interval}), ejecutar en subprocesos aislados el código Python de nivel superior de cada fichero para construir el grafo en memoria, serializarlo en JSON (\code{SerializedDAG}) y persistirlo en la Metadata Database. Este aislamiento aporta dos ventajas críticas: evita que un error de sintaxis o un \code{import} lento bloquee el bucle de planificación, e impide que el Webserver tenga que leer o ejecutar código Python de usuario directamente.
+
+  \item[Webserver:] sirve la interfaz gráfica de administración y la REST API estable (v1) sobre un servidor WSGI \pkg{Gunicorn} con aplicación \pkg{Flask} / \pkg{Flask-AppBuilder} (RBAC). Gracias a la serialización previa efectuada por el DAG File Processor, el Webserver es puramente un lector del estado en la Metadata Database y de los logs (bien desde volumen compartido o, en producción, directamente desde S3, GCS, Azure Blob o Elasticsearch).
+
+  \item[Executor:] no es un proceso separado, sino un módulo pluggable cargado dentro del Scheduler que define \textit{cómo} y \textit{dónde} se ejecutan las instancias de tarea que pasan al estado \code{queued}. Puede lanzar subprocesos locales, publicar mensajes en una cola Celery o invocar la API de Kubernetes para instanciar Pods efímeros.
+
+  \item[Workers:] son los procesos o contenedores encargados de ejecutar el código efectivo de cada tarea (\code{airflow tasks run}). Un rasgo característico ---y a la vez la mayor limitación histórica--- de Airflow 2.x es que los \textit{workers} necesitan acceso directo de red y credenciales contra la Metadata Database para reportar cambios de estado, emitir \textit{heartbeats}, leer conexiones y escribir XComs.
+
+  \item[Triggerer:] demonio asíncrono introducido en Airflow 2.2 basado en un único bucle de eventos \code{asyncio} de Python. Está diseñado para ejecutar \textbf{\textit{Triggers}} ligeros asociados a operadores y sensores diferibles (\textit{deferrable operators}). En lugar de mantener un \textit{worker slot} ocupado esperando horas a que termine un trabajo en Databricks o a que aparezca un fichero en S3, la tarea cede el control al Triggerer, que puede vigilar simultáneamente miles de eventos externos consumiendo apenas unos cientos de megabytes de RAM; al cumplirse la condición, devuelve el control a un worker para finalizar la tarea.
+\end{description}
+
+La Figura~\ref{fig:arquitectura-airflow-2} representa el diagrama completo de la arquitectura de Apache Airflow 2.10, incluyendo los flujos de parseo, planificación, despacho de colas, ejecución asíncrona y el acoplamiento directo de los workers con la base de datos de metadatos.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.85cm and 1.15cm]
+  % Carpeta dags / Git
+  \node[amberbox, text width=2.8cm, minimum height=1.15cm] (dags) {\textbf{Carpeta \texttt{dags/}}\\Git / Volumen\\Scripts Python};
+
+  % DAG File Processor
+  \node[archbox, text width=3.0cm, minimum height=1.15cm, right=1.15cm of dags] (dagproc) {\textbf{DAG File Processor}\\Parseo aislado\\y \texttt{SerializedDAG}};
+
+  % Metadata DB (centro)
+  \node[dbnode, text width=2.6cm, minimum height=1.45cm, right=1.35cm of dagproc] (metadb) {\textbf{Metadata DB}\\PostgreSQL\\(+ PgBouncer)};
+
+  % Webserver (arriba de metadb)
+  \node[archbox, text width=3.2cm, minimum height=1.05cm, above=1.1cm of metadb] (web) {\textbf{Webserver}\\Gunicorn + Flask / RBAC\\UI y REST API v1};
+
+  % Scheduler + Executor (derecha de metadb)
+  \node[darkbox, text width=3.4cm, minimum height=1.45cm, right=1.35cm of metadb] (sched) {\textbf{Scheduler (HA)}\\Bucle de planificación\\+ \textbf{Executor}\\{\scriptsize (Celery / K8s / Local)}};
+
+  % Broker / Cola (abajo derecha)
+  \node[subbox, text width=3.2cm, minimum height=0.95cm, below=1.05cm of sched, draw=PrimaryAccent] (broker) {\textbf{Broker / K8s API}\\Redis, RabbitMQ\\o API de Kubernetes};
+
+  % Workers (abajo centro-derecha)
+  \node[tealbox, text width=3.5cm, minimum height=1.25cm, below=1.05cm of broker] (workers) {\textbf{Workers (1..N)}\\Ejecución de tareas\\Celery / Pods efímeros};
+
+  % Triggerer (abajo izquierda de workers)
+  \node[tealbox, text width=3.2cm, minimum height=1.25cm, left=1.45cm of workers] (triggerer) {\textbf{Triggerer}\\Bucle \texttt{asyncio}\\Tareas \textit{deferrable}};
+
+  % Logs remotos (abajo izquierda)
+  \node[subbox, text width=2.8cm, minimum height=1.15cm, left=1.35cm of triggerer, draw=MutedGray] (logs) {\textbf{Almacén de Logs}\\S3 / GCS / Azure\\o Elasticsearch};
+
+  % Usuario / Operador
+  \node[subbox, text width=2.6cm, left=1.35cm of web, draw=PrimaryDark] (user) {\textbf{Ingenieros / CI}\\Navegador y API};
+
+  % Flechas de flujo
+  \draw[flowarrow] (user.east) -- node[elabel, above=1pt] {HTTP} (web.west);
+  \draw[flowarrow] (web.south) -- node[elabel, right=2pt] {Lee estado/DAGs} (metadb.north);
+  \draw[dashedarrow] (web.west) to[out=220, in=125, looseness=1.15] node[elabel, pos=0.65, left=3pt] {Lee logs} (logs.north west);
+
+  \draw[flowarrow] (dags.east) -- node[elabel, above=1pt] {Escanea} (dagproc.west);
+  \draw[flowarrow] (dagproc.east) -- node[elabel, above=1pt] {Persiste} (metadb.west);
+
+  \draw[flowarrow] (metadb.east) -- node[elabel, above=1pt] {Locks HA} (sched.west);
+  \draw[flowarrow] (sched.west) ++(0,-0.25) -- ($(metadb.east)+(0,-0.25)$);
+
+  \draw[flowarrow] (sched.south) -- node[elabel, right=2pt] {Encola \texttt{TI}} (broker.north);
+  \draw[tealarrow] (broker.south) -- node[elabel, right=2pt] {Despacha} (workers.north);
+
+  % Acceso directo de Workers a Metadata DB (punto débil de Airflow 2.x)
+  \draw[dashedarrow, color=AmberAccent, line width=1.1pt]
+    (workers.west) to[out=165, in=-55]
+    node[elabel, text=AmberAccent, pos=0.58, align=center] {\textbf{Acceso directo BD}\\(XCom, Conn, estado)}
+    ($(metadb.south east)+(-0.15,0)$);
+
+  % Triggerer <-> Metadata DB
+  \draw[tealarrow] (triggerer.north) -- node[elabel, left=2pt] {Eventos \texttt{deferred}} (metadb.south);
+
+  % Workers leen dags y escriben logs
+  \draw[dashedarrow] (dags.south) to[out=-90, in=180] node[elabel, pos=0.35] {Código DAG} ($(triggerer.south west)+(-0.4,-0.55)$) -- ($(workers.south)+(0,-0.55)$) -- (workers.south);
+  \draw[dashedarrow] (workers.west) ++(0,-0.35) -- ++(-0.5,0) |- ($(logs.east)+(0,-0.2)$);
+\end{tikzpicture}%
+}
+\caption{Arquitectura interna de Apache Airflow 2.10. Obsérvese en ámbar el acceso directo de los \textit{workers} a la Metadata Database, principal cuello de botella de seguridad y acoplamiento resuelto posteriormente en Airflow 3.0.}
+\label{fig:arquitectura-airflow-2}
+\end{figure}
+
+\begin{infobox}[Ciclo de vida de una \code{TaskInstance} en Airflow]
+Cada tarea de un \code{DagRun} atraviesa una máquina de estados estrictamente registrada en la Metadata Database:
+\begin{enumerate}
+  \item \code{none} $\to$ \code{scheduled}: el \textbf{Scheduler} verifica que todas las dependencias aguas arriba cumplen la \code{trigger\_rule} y que existen \textit{slots} disponibles en el \textit{Pool}.
+  \item \code{scheduled} $\to$ \code{queued}: el \textbf{Executor} acepta la tarea y la coloca en su cola de despacho (Redis, RabbitMQ o API de Kubernetes).
+  \item \code{queued} $\to$ \code{running}: un \textbf{Worker} recoge la tarea e inicia su ejecución emitiendo \textit{heartbeats} periódicos.
+  \item \code{running} $\to$ \code{deferred} (opcional): si es un operador diferible, libera el worker y delega la espera asíncrona al \textbf{Triggerer}; cuando el evento llega, vuelve a \code{scheduled}.
+  \item \code{running} $\to$ \code{success} / \code{up\_for\_retry} / \code{failed}: si se produce una excepción y quedan reintentos configurados, espera el \code{retry\_delay} antes de volver a \code{scheduled}; de lo contrario termina en \code{failed} y propaga \code{upstream\_failed} a las tareas dependientes.
+\end{enumerate}
+\end{infobox}
+
+% ============================================================================
+\section{Ejecutores de Airflow y estrategias de escalado}\label{sec:ejecutores}
+% ============================================================================
+
+Una de las fortalezas arquitectónicas de Apache Airflow es que el mismo código Python de un DAG puede ejecutarse sin modificaciones en un portátil de desarrollo o en un clúster elástico de miles de contenedores en la nube cambiando únicamente el \textbf{Executor}. Sin embargo, cada ejecutor impone compromisos distintos en aislamiento, latencia de arranque y complejidad operativa.
+
+\subsection{Catálogo de ejecutores: de local a edge distribuido}\label{subsec:catalogo-ejecutores}
+
+\begin{description}
+  \item[\code{SequentialExecutor}:] ejecuta una única tarea cada vez dentro del mismo proceso del Scheduler. Existe únicamente para permitir pruebas triviales sobre SQLite sin levantar infraestructura adicional. Nunca debe utilizarse más allá de una demostración mínima (de hecho, en Airflow 3 el uso estándar en local pasa directamente a \code{LocalExecutor}).
+
+  \item[\code{LocalExecutor}:] habilita paralelismo real lanzando subprocesos locales (\pkg{multiprocessing}) en el mismo servidor donde corre el Scheduler. Exige PostgreSQL o MySQL como Metadata Database. Es una opción sorprendentemente capaz y económica para despliegues medianos (decenas de DAGs diarios donde el cómputo pesado se delega en Spark, Snowflake o BigQuery) en una única máquina virtual robusta con escalado vertical, eliminando la operación de brókeres o Kubernetes. Su techo es la memoria y CPU del host único y la ausencia de alta disponibilidad de ejecución.
+
+  \item[\code{CeleryExecutor}:] implementa un modelo clásico de \textbf{cola de tareas distribuida} apoyado en \pkg{Celery} y un bróker de mensajes (\textbf{Redis} o \textbf{RabbitMQ}). El Scheduler encola mensajes ligeros y una flota horizontal de \textit{workers} de larga duración consume tareas con latencia de arranque casi nula (milisegundos). Permite monitorización en vivo con \pkg{Flower}, asignación de tareas a grupos de máquinas especializadas mediante colas (\code{queue="gpu\_workers"}) y autoescalado basado en demanda con \pkg{KEDA}. Su principal desventaja es que todas las tareas asignadas a un mismo worker comparten el entorno Python e imagen del sistema operativo, lo que puede provocar conflictos de dependencias si no se combinan con operadores en contenedor o entornos virtuales aislados.
+
+  \item[\code{KubernetesExecutor}:] prescinde de brókeres externos y de workers permanentes. Para cada \code{TaskInstance} que entra en ejecución, el Scheduler solicita al API Server de Kubernetes la creación de un \textbf{Pod efímero dedicado}, el cual ejecuta exclusivamente esa tarea y se destruye al finalizar. Proporciona \textbf{aislamiento total} de memoria, CPU, GPU, permisos IAM (\textit{ServiceAccounts}) e imagen Docker por tarea (configurable dinámicamente vía \code{executor\_config=\{"pod\_override": ...\}}). A cambio, introduce una latencia de arranque (\textit{cold start}) de $5\text{--}30\,\text{s}$ por planificación de Pod y descarga de imagen, y puede presionar el plano de control de Kubernetes si se disparan miles de microtareas de dos segundos de duración.
+
+  \item[\code{CeleryKubernetesExecutor}:] combina lo mejor de los dos enfoques anteriores dentro de un único despliegue. Por defecto, las tareas ligeras, frecuentes y sensibles a la latencia (sensores breves, disparos SQL/API, orquestación ligera) se despachan a los workers Celery siempre activos. Cuando una tarea requiere mucha memoria, una imagen Docker distinta o aislamiento estricto, basta con asignarle la cola reservada \code{queue="kubernetes"} para que el ejecutor la instancie como un Pod efímero independiente. En Airflow 2.9+ y 3.0+, además, la funcionalidad \textbf{\textit{Multi-Executor}} permite configurar múltiples ejecutores simultáneamente y seleccionar el ejecutor por tarea mediante el argumento \code{executor="..."}.
+
+  \item[{\code{EdgeExecutor} \badge[TealAccent]{Airflow 3}:}] introducido a través del paquete \pkg{apache-airflow-providers-edge3} y potenciado por la nueva arquitectura de Airflow 3, permite desplegar \textit{workers} remotos en ubicaciones geográficamente distribuidas, redes privadas \textit{on-premise}, entornos con GPUs locales o incluso hosts Windows, comunicándose con el plano de control central exclusivamente a través de \textbf{HTTP/HTTPS saliente}. A diferencia de Celery, no requiere abrir puertos hacia Redis ni exponer la Metadata Database a la red externa, abriendo la puerta a arquitecturas híbridas \textit{cloud + on-premise} seguras.
+\end{description}
+
+La Tabla~\ref{tab:comparativa-ejecutores} sintetiza las propiedades operativas de los seis ejecutores para orientar su elección.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa técnica de ejecutores en Apache Airflow 2.10 y 3.0+.}
+\label{tab:comparativa-ejecutores}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{2.95cm} C{1.6cm} C{1.55cm} C{1.65cm} C{1.65cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Ejecutor} &
+\textcolor{white}{\sffamily\bfseries Aislamiento} &
+\textcolor{white}{\sffamily\bfseries Latencia arranque} &
+\textcolor{white}{\sffamily\bfseries Escalabilidad} &
+\textcolor{white}{\sffamily\bfseries Complejidad} &
+\textcolor{white}{\sffamily\bfseries Caso de uso ideal} \\
+\midrule
+\code{Sequential} & Nulo & $<1\,\text{s}$ & Ninguna (1 tarea) & Mínima & Solo demos locales triviales con SQLite. \\
+\rowcolor{TableStripe}
+\code{Local} & Bajo (proceso) & $<1\,\text{s}$ & Vertical (1 nodo) & Baja & Entornos dev/staging o cargas medianas delegadas a Cloud DW. \\
+\code{Celery} & Medio (entorno compartido) & $<1\,\text{s}$ & Horizontal alta (+KEDA) & Media & Alto volumen de tareas rápidas y predecibles en producción. \\
+\rowcolor{TableStripe}
+\code{Kubernetes} & Máximo (Pod por tarea) & $5\text{--}30\,\text{s}$ & Horizontal masiva & Alta (K8s) & Cargas heterogéneas, ML/GPU, imágenes distintas y aislamiento estricto. \\
+\code{CeleryKubernetes} & Híbrido por tarea & $<1\,\text{s}$ / $15\,\text{s}$ & Horizontal masiva & Alta & Plataformas mixtas: miles de tareas rápidas + trabajos pesados aislados. \\
+\rowcolor{TableStripe}
+\code{Edge} \badge[TealAccent]{AF 3} & Alto (host remoto) & $1\text{--}3\,\text{s}$ & Distribuida (WAN/Edge) & Media & Escenarios híbridos cloud + \textit{on-premise}, red privada o GPUs locales. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Control fino de concurrencia: Pools, Queues, Priority Weights y paralelismo}\label{subsec:concurrencia}
+
+Escalar horizontalmente sin límites suele trasladar el cuello de botella desde Airflow hacia los sistemas aguas abajo: lanzar 200 tareas concurrentes contra una base de datos transaccional ERP o una API SaaS con cuota estricta puede provocar caídas graves en producción. Para gobernar la concurrencia con precisión quirúrgica, Airflow ofrece cuatro mecanismos complementarios:
+
+\begin{enumerate}
+  \item \textbf{Pools (semáforos de recursos externos):} un \textit{Pool} define un cupo máximo de \textit{slots} concurrentes compartidos entre todos los DAGs (por ejemplo, \code{oracle\_erp\_pool} con 4 \textit{slots}). Una tarea asignada con \code{pool="oracle\_erp\_pool"} y \code{pool\_slots=1} (o \code{2} para consultas pesadas) solo pasa a ejecución si hay capacidad disponible en el semáforo, protegiendo el sistema origen sin frenar el resto del clúster.
+  \item \textbf{Queues (enrutamiento por afinidad de hardware o red):} en \code{CeleryExecutor} y \code{EdgeExecutor}, cada worker se suscribe a una o varias colas nombradas (p. ej., \code{default}, \code{high\_mem}, \code{gpu\_a100}, \code{vpc\_finance}). Etiquetar una tarea con \code{queue="high\_mem"} garantiza que se despache exclusivamente a nodos con el perfil adecuado.
+  \item \textbf{Priority Weights (\code{priority\_weight} y \code{weight\_rule}):} cuando el número de tareas listas supera los \textit{slots} disponibles en un \textit{Pool} o en el ejecutor, el Scheduler ordena la cola por peso descendente. La estrategia \code{weight\_rule} (por defecto \code{downstream}) suma los pesos de todas las tareas descendientes de una tarea, dando prioridad automática a los caminos críticos más largos; también admite \code{upstream} y \code{absolute} (útil cuando una tarea de negocio crítica debe adelantarse siempre con \code{priority\_weight=100}).
+  \item \textbf{Parámetros jerárquicos de paralelismo:} el rendimiento global queda acotado por el mínimo efectivo de tres niveles de configuración (en \code{airflow.cfg} o variables de entorno \code{AIRFLOW\_\_CORE\_\_*}):
+  \begin{itemize}
+    \item \code{parallelism} (global): número máximo de \code{TaskInstance} activas simultáneamente en toda la instancia de Airflow.
+    \item \code{max\_active\_tasks\_per\_dag} (por DAG, antes llamado \code{dag\_concurrency}): tope de tareas concurrentes de un mismo DAG sumando todos sus \code{DagRuns} activos.
+    \item \code{max\_active\_runs\_per\_dag} (por DAG): número máximo de \code{DagRuns} simultáneos permitidos para un mismo DAG (crucial para controlar el ritmo de un \textit{backfill} masivo o evitar solapamientos con \code{max\_active\_runs=1}).
+  \end{itemize}
+\end{enumerate}
+
+% ============================================================================
+\section{Instalación, arranque local y despliegue productivo}\label{sec:instalacion-despliegue}
+% ============================================================================
+
+El ciclo de vida profesional de una plataforma Airflow suele atravesar tres niveles de despliegue: un entorno ligero en máquina local para aprendizaje o prototipado rápido, una pila multi-contenedor reproducible con Docker Compose para desarrollo en equipo e integración continua, y un despliegue altamente disponible sobre Kubernetes gestionado mediante el Helm Chart oficial.
+
+\subsection{Instalación en entorno virtual Python y ficheros de constraints}\label{subsec:instalacion-venv}
+
+Para las primeras pruebas locales, Airflow puede instalarse directamente desde PyPI dentro de un entorno virtual Python aislado (\code{venv}). El Listing~\ref{lst:install-airflow-venv} reproduce el procedimiento canónico de instalación y arranque local con Airflow 2.10.4.
+
+\begin{lstlisting}[style=bash, caption={Instalación local de Apache Airflow 2.10.4 con entorno virtual, fichero oficial de \textit{constraints} y arranque en modo \texttt{standalone}.}, label={lst:install-airflow-venv}]
+# 1. Crear y activar un entorno virtual Python aislado
+python3 -m venv venv
+source venv/bin/activate
+
+# 2. Definir version de Airflow y version exacta de Python activa
+AIRFLOW_VERSION=2.10.4
+PYTHON_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+
+# 3. Instalar Airflow con extra [celery] respetando estrictamente los constraints
+pip install "apache-airflow[celery]==${AIRFLOW_VERSION}" \
+  --constraint "${CONSTRAINT_URL}"
+
+# 4. Congelar el arbol exacto de dependencias para reproducibilidad
+pip freeze > requirements.txt
+
+# 5. Definir el directorio raiz de Airflow y arrancar el servidor de desarrollo
+export AIRFLOW_HOME="$PWD/airflow"
+airflow standalone
+\end{lstlisting}
+
+\subsubsection{¿Por qué son críticos los ficheros de constraints?}
+
+Apache Airflow integra cientos de bibliotecas de ecosistema con acoplamientos finos entre versiones (SQLAlchemy, Alembic, Pendulum, Pydantic, Flask/FastAPI, Celery, OpenTelemetry y decenas de SDKs cloud). Si se ejecuta simplemente \code{pip install apache-airflow==2.10.4} sin \code{--constraint}, el resolutor de \pkg{pip} instalará las versiones más recientes compatibles según los rangos abiertos de cada dependencia, lo que frecuentemente introduce incompatibilidades transitivas que impiden arrancar el Scheduler o rompen determinados \textit{providers}.
+
+Los ficheros oficiales de \textbf{\textit{constraints}} publicados por el proyecto Apache Airflow para cada par \code{(AIRFLOW\_VERSION, PYTHON\_VERSION)} contienen el conjunto exacto de versiones probadas conjuntamente en la batería completa de integración continua de Airflow. Incluso al instalar \textit{providers} adicionales (como \pkg{apache-airflow-providers-postgres} o \pkg{apache-airflow-providers-amazon}) conviene pasar la misma bandera \code{--constraint} para garantizar estabilidad determinista. En proyectos nuevos con Python 3.11 o 3.12 y Airflow 3.0+, el mecanismo es idéntico ajustando \code{AIRFLOW\_VERSION=3.0.x} (y utilizando \pkg{uv} como alternativa ultrarrápida a \pkg{pip}).
+
+\subsubsection{¿Qué levanta exactamente \texttt{airflow standalone}?}
+
+El comando \code{airflow standalone} está concebido para ofrecer una experiencia ``todo en uno'' en segundos. Bajo el capó realiza automáticamente cuatro operaciones:
+\begin{enumerate}
+  \item Crea la estructura inicial dentro de \code{\$AIRFLOW\_HOME} (\code{airflow.cfg}, carpeta \code{logs/} y fichero SQLite \code{airflow.db} si no existe).
+  \item Ejecuta las migraciones de esquema de la base de datos (\code{airflow db migrate}).
+  \item Crea un usuario administrador inicial (\code{admin}) con una contraseña aleatoria segura, imprimiéndola en la salida estándar y guardándola en \code{\$AIRFLOW\_HOME/simple\_auth\_manager\_passwords.json} (Airflow 3) o \code{standalone\_admin\_password.txt} (Airflow 2.10).
+  \item Lanza y supervisa en un único árbol de procesos el \textbf{Scheduler}, el \textbf{Triggerer}, el \textbf{DAG Processor} y el \textbf{Webserver} (Gunicorn en el puerto \code{8080}; \textbf{API Server} basado en FastAPI en Airflow 3).
+\end{enumerate}
+
+\begin{warningbox}[Por qué \code{airflow standalone} nunca debe usarse en producción]
+El modo \code{standalone} acopla todos los componentes en un único host y proceso padre, utiliza por defecto SQLite sin concurrencia y carece de aislamiento de fallos, alta disponibilidad, balanceo de carga y gestión de secretos externa. Debe restringirse exclusivamente al aprendizaje, validación de prototipos y pruebas locales.
+\end{warningbox}
+
+\subsection{Despliegue local realista con Docker Compose}\label{subsec:docker-compose}
+
+Cuando un equipo desarrolla DAGs con PostgreSQL, colas Celery, conexiones reales y dependencias del sistema operativo reproducibles, el estándar local es \textbf{Docker Compose}. Toda la configuración de Airflow puede inyectarse limpiamente mediante variables de entorno siguiendo la convención \code{AIRFLOW\_\_<SECCION>\_\_<CLAVE>} (doble guion bajo separando sección y parámetro de \code{airflow.cfg}). El Listing~\ref{lst:docker-compose-airflow} muestra una definición completa, limpia y anotada lista para desarrollo profesional con \code{CeleryExecutor}.
+
+\begin{lstlisting}[style=yaml, caption={Definición de pila realista con Docker Compose para Airflow 2.10 (anotando la transición de \texttt{webserver} a \texttt{apiserver} en Airflow 3.0+).}, label={lst:docker-compose-airflow}]
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.10.4-python3.11
+  # En Airflow 3.0+: image: apache/airflow:3.0.2-python3.11
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    # Clave Fernet para cifrar Connections y Variables en Metadata DB
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-""}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./config:/opt/airflow/config
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create --username admin --password admin \
+          --firstname Admin --lastname User --role Admin --email admin@example.com || true
+
+  # En Airflow 3.0+ este servicio pasa a llamarse airflow-apiserver con command: api-server
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:
+\end{lstlisting}
+
+\subsection{Despliegue productivo en Kubernetes con el Helm Chart oficial}\label{subsec:helm-kubernetes}
+
+En entornos productivos exigentes, el estándar de despliegue autogestionado es el \textbf{Helm Chart oficial de Apache Airflow} (\code{apache-airflow/airflow}) sobre Kubernetes (EKS, GKE, AKS o clúster propio). A diferencia de Docker Compose, el despliegue en producción exige tomar cuatro decisiones de arquitectura críticas:
+
+\begin{enumerate}
+  \item \textbf{Estrategia de entrega y sincronización de DAGs:}
+  \begin{itemize}
+    \item \textbf{\code{git-sync} (contenedor \textit{sidecar}):} cada Pod de DAG Processor, Scheduler y Worker ejecuta un contenedor auxiliar que realiza \code{git pull} cada 30--60 segundos desde el repositorio corporativo. Permite iterar DAGs con gran rapidez sin reconstruir imágenes Docker, a costa de depender de la disponibilidad del servidor Git en tiempo de ejecución.
+    \item \textbf{DAGs empaquetados (\textit{baked}) en la imagen Docker:} el pipeline CI/CD copia la carpeta \code{dags/} dentro de la imagen inmutable de Airflow y despliega con \code{helm upgrade}. Garantiza inmutabilidad absoluta, consistencia entre versiones de código y dependencias Python, y cero dependencia externa de Git, aunque cada cambio de DAG exige construir y rotar contenedores.
+    \item \textbf{Volúmenes compartidos (EFS/NFS):} suelen desaconsejarse a gran escala por problemas de latencia I/O y contención de metadatos POSIX cuando decenas de workers leen los mismos ficheros simultáneamente.
+  \end{itemize}
+  \item \textbf{Persistencia remota de logs:} dado que los Pods de Kubernetes son efímeros y pueden ser eliminados o reubicados en cualquier momento, almacenar logs en disco local implica perder la trazabilidad al destruirse el Pod. En producción se activa el \textbf{\textit{remote logging}} hacia almacenamiento de objetos (\code{s3://}, \code{gs://} o \code{wasb://}) o se redirigen los registros hacia \pkg{Elasticsearch}/\pkg{OpenSearch}.
+  \item \textbf{Multiplexado de base de datos con \pkg{PgBouncer}:} el chart oficial incluye soporte nativo para desplegar \pkg{PgBouncer} en modo \textit{transaction pooling} delante de una base de datos PostgreSQL gestionada (RDS, Cloud SQL, Azure Flexible Server). Evita agotar el límite \code{max\_connections} cuando cientos de tareas concurrentes consultan la Metadata DB.
+  \item \textbf{Autoescalado elástico con \pkg{KEDA} (\textit{Kubernetes Event-Driven Autoscaling}):} cuando se emplea \code{CeleryExecutor} o \code{CeleryKubernetesExecutor}, el chart configura un objeto \code{ScaledObject} de KEDA que consulta periódicamente en la Metadata DB el número de tareas en estado \code{queued} y \code{running}, escalando el \code{StatefulSet} de workers horizontalmente de forma automática (incluso reduciendo a cero los workers en franjas sin actividad).
+\end{enumerate}
+
+El Listing~\ref{lst:helm-values} presenta un fragmento realista de \code{values.yaml} que materializa estas cuatro buenas prácticas productivas.
+
+\begin{lstlisting}[style=yaml, caption={Extracto productivo de \texttt{values.yaml} para el Helm Chart oficial de Apache Airflow sobre Kubernetes.}, label={lst:helm-values}]
+executor: "CeleryKubernetesExecutor"
+
+# Uso de base de datos externa gestionada + PgBouncer habilitado
+postgresql:
+  enabled: false
+data:
+  metadataSecretName: airflow-postgres-connection
+pgbouncer:
+  enabled: true
+  maxClientConn: 1000
+  metadataPoolSize: 25
+
+# Alta disponibilidad en Scheduler y DAG Processor separado
+scheduler:
+  replicas: 2
+dagProcessor:
+  enabled: true
+  replicas: 2
+
+# Sincronizacion continua de DAGs desde repositorio Git corporativo
+dags:
+  gitSync:
+    enabled: true
+    repo: ssh://git@github.com/mi-org/data-pipelines.git
+    branch: main
+    subPath: "dags"
+    wait: 60
+    sshKeySecret: airflow-git-ssh-secret
+
+# Autoescalado elastico de workers Celery mediante KEDA
+workers:
+  keda:
+    enabled: true
+    minReplicaCount: 1
+    maxReplicaCount: 30
+    pollingInterval: 15
+    cooldownPeriod: 120
+
+# Persistencia remota de logs en Amazon S3 (pods efimeros sin PVC local)
+logs:
+  persistence:
+    enabled: false
+config:
+  logging:
+    remote_logging: "True"
+    remote_base_log_folder: "s3://mi-empresa-airflow-logs/prod"
+    remote_log_conn_id: "aws_logs_s3"
+\end{lstlisting}
+
+% ============================================================================
+\section{Apache Airflow 3.0+ (2025--2026) en profundidad}\label{sec:airflow-3}
+% ============================================================================
+
+Lanzado en abril de 2025 y consolidado durante 2026, \textbf{Apache Airflow 3.0+} supone el mayor rediseño arquitectónico del proyecto desde su concepción en Airbnb en 2014. Lejos de ser un simple incremento cosmético de versión, resuelve de raíz los cuatro problemas históricos que habían limitado a Airflow frente a orquestadores más recientes: la falta de aislamiento de seguridad de las tareas, la ausencia de versionado nativo de DAGs, la dependencia exclusiva del lenguaje Python en ejecución y una experiencia de \textit{backfills} e interfaz web envejecidas.
+
+\begin{modernbox}[Convivencia entre Airflow 2.10 y Airflow 3.0+ en el mercado laboral (2025--2026)]
+Al incorporarse hoy a equipos de ingeniería de datos o MLOps resulta habitual encontrar \textbf{ambas generaciones conviviendo}:
+\begin{itemize}
+  \item \textbf{Airflow 2.10.x} sigue siendo la base instalada mayoritaria en grandes empresas con cientos o miles de DAGs heredados en proceso gradual de migración, así como en entornos gestionados que exigen ventanas largas de certificación.
+  \item \textbf{Airflow 3.0+} es el estándar recomendado para todo despliegue nuevo (\textit{greenfield}) y la hoja de ruta oficial de la comunidad, especialmente en plataformas multi-equipo, cargas de IA/LLMOps con dependencias divergentes y despliegues híbridos \textit{cloud/edge}.
+\end{itemize}
+Dominar tanto la anatomía 2.10 como las novedades de 3.0+ ---y saber migrar código limpiamente entre ambas--- constituye una ventaja competitiva inmediata.
+\end{modernbox}
+
+\subsection{Re-arquitectura cliente-servidor: API Server y Task Execution API}\label{subsec:task-execution-api}
+
+Como se evidenció en la Figura~\ref{fig:arquitectura-airflow-2}, el talón de Aquiles de Airflow 2.x era que cada worker ejecutaba código arbitrario de usuario con acceso directo SQL a la Metadata Database. Eso acarreaba tres problemas graves en entornos empresariales:
+\begin{enumerate}
+  \item \textbf{Superficie de ataque de seguridad:} cualquier tarea con un bug o código malicioso podía consultar directamente la tabla \code{connection} o \code{dag\_run} de otros departamentos, o corromper metadatos del Scheduler.
+  \item \textbf{Acoplamiento de entorno y dependencias:} el proceso que ejecutaba la tarea necesitaba instalar el núcleo completo de Airflow junto con su versión exacta de SQLAlchemy y drivers de base de datos, limitando qué versiones de librerías de ML/IA podían convivir en el mismo entorno.
+  \item \textbf{Presión sobre PostgreSQL:} miles de workers abriendo conexiones TCP directas exigían arquitecturas complejas de red (VPC peering, reglas de firewall, PgBouncer masivo).
+\end{enumerate}
+
+Airflow 3.0 (mediante la propuesta \textbf{AIP-72}) elimina por completo ese modelo e instaura una \textbf{arquitectura cliente-servidor estrictamente aislada}:
+\begin{itemize}
+  \item \textbf{Cero acceso directo a la Metadata Database desde las tareas:} los workers ya no conocen las credenciales ni el \textit{endpoint} de PostgreSQL. Únicamente los componentes del plano de control (Scheduler, DAG Processor, Triggerer y API Server) se comunican con la base de datos.
+  \item \textbf{API Server unificado (FastAPI):} sustituye al antiguo Webserver basado en Flask/Gunicorn. Sirve tanto la nueva interfaz web en React como la REST API pública (v2) y la nueva \textbf{Task Execution API}.
+  \item \textbf{Task Execution API (HTTP/JSON + JWT efímeros):} toda operación realizada durante la ejecución de una tarea ---reportar cambios de estado, enviar \textit{heartbeats}, solicitar una \code{Connection} o \code{Variable} autorizada, escribir o leer un XCom--- se realiza mediante llamadas HTTP autenticadas con un token JWT de vida corta y alcance estrictamente restringido a esa \code{TaskInstance}.
+\end{itemize}
+
+La Figura~\ref{fig:arquitectura-airflow-3} ilustra esta nueva topología destacando la frontera de seguridad (\textit{Security Boundary}) que separa el plano de control del plano de ejecución distribuido y poliglota.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.85cm and 1.1cm]
+  % Plano de Control (izquierda / arriba)
+  \node[amberbox, text width=3.0cm, minimum height=1.15cm] (bundles) {\textbf{DAG Bundles}\\GitDagBundle (commits)\\Local / S3 Bundles};
+
+  \node[archbox, text width=3.2cm, minimum height=1.15cm, right=1.1cm of bundles] (dagproc3) {\textbf{DAG Processor}\\{\scriptsize (Obligatorio en AF 3)}\\Versionado inmutable};
+
+  \node[dbnode, text width=2.7cm, minimum height=1.5cm, below=1.05cm of dagproc3] (metadb3) {\textbf{Metadata DB}\\PostgreSQL\\{\scriptsize (Acceso exclusivo\\Plano de Control)}};
+
+  \node[darkbox, text width=3.2cm, minimum height=1.25cm, left=1.1cm of metadb3] (sched3) {\textbf{Scheduler + Executor}\\Backfills nativos\\Asset Scheduling};
+
+  \node[tealbox, text width=3.2cm, minimum height=1.25cm, right=1.25cm of metadb3] (apiserver) {\textbf{API Server (FastAPI)}\\REST API v2\\+ \textbf{Task Execution API}};
+
+  \node[archbox, text width=3.2cm, minimum height=1.05cm, above=1.05cm of apiserver] (ui3) {\textbf{Nueva UI (React)}\\Vista Dual Task / Asset\\Historial Versiones y Backfills};
+
+  \node[subbox, text width=2.8cm, minimum height=0.85cm, below=0.95cm of metadb3, draw=TealAccent] (trig3) {\textbf{Triggerer (\texttt{asyncio})}\\Eventos y AssetWatchers};
+
+  % Caja de Plano de Control
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(bundles)(dagproc3)(metadb3)(sched3)(apiserver)(ui3)(trig3),
+          draw=PrimaryAccent, fill=SoftBg,
+          label={[font=\sffamily\footnotesize\bfseries, text=PrimaryDark]above:PLANO DE CONTROL (Único con acceso a Metadata DB)}] (cp) {};
+  \end{scope}
+
+  % Frontera de seguridad vertical
+  \draw[dashed, line width=1.4pt, color=CrimsonAccent]
+    ($(cp.north east)+(0.65,0.25)$) -- ($(cp.south east)+(0.65,-0.25)$);
+  \node[rotate=90, font=\sffamily\scriptsize\bfseries, text=CrimsonAccent, fill=white, inner sep=3pt]
+    at ($(cp.east)+(0.65,0)$) {SECURITY BOUNDARY --- CERO ACCESO DIRECTO A BD};
+
+  % Plano de Ejecución (derecha)
+  \node[tealbox, text width=3.6cm, minimum height=1.25cm, right=2.15cm of ui3] (wpy) {\textbf{Workers Python Aislados}\\Task SDK ligero\\(Celery / Pods K8s)};
+
+  \node[tealbox, text width=3.6cm, minimum height=1.25cm, below=0.85cm of wpy] (wpoly) {\textbf{Workers Multi-lenguaje}\\Go, Rust, Java, TypeScript\\{\scriptsize (Contrato OpenAPI Task API)}};
+
+  \node[amberbox, text width=3.6cm, minimum height=1.25cm, below=0.85cm of wpoly] (wedge) {\textbf{Edge Workers Remotos}\\On-premise / GPUs / WAN\\{\scriptsize (Solo HTTPS saliente)}};
+
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(wpy)(wpoly)(wedge), draw=TealAccent, fill=ModernBg!40!white,
+          label={[font=\sffamily\footnotesize\bfseries, text=TealAccent]above:PLANO DE EJECUCIÓN AISLADO}] (ep) {};
+  \end{scope}
+
+  % Flechas dentro del Plano de Control
+  \draw[flowarrow] (bundles.east) -- (dagproc3.west);
+  \draw[flowarrow] (dagproc3.south) -- (metadb3.north);
+  \draw[flowarrow] (sched3.east) -- (metadb3.west);
+  \draw[flowarrow] (metadb3.west) ++(0,-0.25) -- ($(sched3.east)+(0,-0.25)$);
+  \draw[flowarrow] (metadb3.east) -- (apiserver.west);
+  \draw[flowarrow] (apiserver.west) ++(0,-0.25) -- ($(metadb3.east)+(0,-0.25)$);
+  \draw[tealarrow] (ui3.south) -- (apiserver.north);
+  \draw[tealarrow] (trig3.north) -- (metadb3.south);
+
+  % Flechas cruzando la frontera hacia Workers (HTTP/JWT)
+  \draw[tealarrow, line width=1.2pt] (apiserver.east) -- ++(0.95,0) |- (wpy.west);
+  \node[font=\sffamily\scriptsize\bfseries, text=TealAccent, fill=white, draw=TealAccent!40, rounded corners=2pt, inner sep=2pt]
+    at ($(apiserver.east)+(0.95, 2.35)$) {HTTP/JSON + JWT};
+  \draw[tealarrow, line width=1.2pt] (apiserver.east) -- (wpoly.west);
+  \draw[tealarrow, line width=1.2pt] (apiserver.east) -- ++(0.95,0) |- (wedge.west);
+\end{tikzpicture}%
+}
+\caption{Arquitectura cliente-servidor de Apache Airflow 3.0+. Las tareas interactúan exclusivamente a través de la \textit{Task Execution API} autenticada con JWT, eliminando el acceso directo a la Metadata Database y habilitando ejecución aislada y multi-lenguaje.}
+\label{fig:arquitectura-airflow-3}
+\end{figure}
+
+\subsection{Task SDK y soporte multi-lenguaje}\label{subsec:task-sdk}
+
+Como consecuencia directa de separar el plano de control del plano de ejecución, Airflow 3 introduce el paquete ligero \pkg{apache-airflow-task-sdk}. Hasta la versión 2.10, los autores de DAGs debían importar símbolos dispersos en paquetes internos heterogéneos (\code{airflow.decorators}, \code{airflow.models.variable}, \code{airflow.datasets}, \code{airflow.operators.python}), lo que dificultaba mantener compatibilidad hacia atrás.
+
+El nuevo Task SDK expone un \textbf{espacio de nombres público, estable y unificado} bajo \code{airflow.sdk}:
+\begin{itemize}
+  \item \code{from airflow.sdk import dag, task, task\_group, DAG, Asset, Variable, Connection, Context, BaseOperator}
+  \item Permite empaquetar contenedores de ejecución de tareas mucho más ligeros y sin conflictos de librerías con el núcleo del Scheduler (\pkg{apache-airflow-core}).
+  \item \textbf{Soporte multi-lenguaje nativo:} al estar definida la interacción entre worker y plano de control mediante una especificación OpenAPI HTTP estándar (la Task Execution API), es posible implementar SDKs de tareas y workers nativos en \textbf{Go, Rust, Java o TypeScript} (como el \textit{Go Task SDK} oficial introducido junto a Airflow 3). Una organización puede ejecutar tareas escritas en Go o Rust con rendimiento nativo conservando todo el seguimiento, reintentos, XComs y observabilidad en Airflow sin levantar un intérprete Python dentro del worker.
+\end{itemize}
+
+\subsection{DAG Versioning y DAG Bundles (AIP-66)}\label{subsec:dag-versioning}
+
+Uno de los problemas más notorios de Airflow 2.x en producción era el fenómeno de \textbf{\textit{split-brain} durante despliegues en caliente}: si un \code{DagRun} se encontraba a mitad de ejecución y el equipo desplegaba una modificación estructural del DAG (añadiendo, renombrando o eliminando tareas), la Metadata Database sobrescribía inmediatamente la estructura del DAG. El resultado era confuso y peligroso: las tareas pasadas desaparecían visualmente de la interfaz o quedaban huérfanas, las tareas restantes se ejecutaban con el código nuevo dentro de un \code{DagRun} iniciado con el viejo, y auditar qué grafo exacto se había ejecutado dos meses atrás resultaba imposible.
+
+Airflow 3.0 resuelve definitivamente este problema mediante dos conceptos integrados:
+\begin{itemize}
+  \item \textbf{DAG Bundles:} el DAG Processor (ahora componente obligatorio) ya no se limita a leer una carpeta plana mutable, sino que gestiona \textit{bundles} versionables como \code{GitDagBundle} (vinculado a ramas, etiquetas y \textit{hashes} de \textit{commit} específicos de Git) o \code{LocalDagBundle}.
+  \item \textbf{Versionado nativo de DAGs:} cada vez que cambia la estructura del grafo o la referencia del \textit{bundle}, Airflow registra una nueva versión numerada inmutable (\code{v1}, \code{v2}, \code{v3}\ldots) en la Metadata Database. Cada \code{DagRun} y \code{TaskInstance} queda asociado permanentemente a la versión exacta del código con la que se ejecutó. Esto habilita una auditoría rigurosa en la UI (inspeccionar el grafo exacto de cualquier ejecución histórica), evita inconsistencias en despliegues continuos y permite reejecutar tareas utilizando la versión exacta correspondiente.
+\end{itemize}
+
+El Listing~\ref{lst:git-dag-bundle} ilustra cómo se configura un \code{GitDagBundle} en Airflow 3.0+ mediante la variable de entorno \code{AIRFLOW\_\_DAG\_PROCESSOR\_\_DAG\_BUNDLE\_CONFIG\_LIST}.
+
+\begin{lstlisting}[style=json, caption={Configuración de \texttt{GitDagBundle} en Airflow 3.0+ para sincronización y versionado inmutable de DAGs desde Git.}, label={lst:git-dag-bundle}]
+[
+  {
+    "name": "analytics_dags_repo",
+    "classpath": "airflow.providers.git.bundles.git.GitDagBundle",
+    "kwargs": {
+      "tracking_ref": "main",
+      "git_conn_id": "github_corp_ssh",
+      "subdir": "dags",
+      "refresh_interval": 60
+    }
+  }
+]
+\end{lstlisting}
+
+\subsection{Assets y Asset-Driven Scheduling (AIP-74 / AIP-75)}\label{subsec:assets-airflow3}
+
+En Airflow 2.4 se introdujo el concepto de \code{Dataset} como primer paso hacia la programación dirigida por datos. En Airflow 3.0, ese concepto madura y se eleva a ciudadano de primera clase bajo el nombre de \textbf{\code{Asset}} (alineando la terminología con la industria de ingeniería de datos). Sus capacidades más destacadas son:
+\begin{itemize}
+  \item \textbf{Expresiones booleanas sobre activos:} un DAG consumidor puede declarar su planificación combinando múltiples activos con operadores lógicos \code{\&} (AND) y \code{|} (OR). Por ejemplo, \code{schedule=(asset\_ventas \& asset\_tipos\_cambio)} solo dispara el cálculo financiero cuando \textit{ambos} activos se han actualizado; por el contrario, \code{schedule=(asset\_eu | asset\_us)} reacciona en cuanto se actualiza cualquiera de los dos.
+  \item \textbf{Combinación híbrida tiempo + datos:} mediante \code{AssetOrTimeSchedule} es posible disparar un pipeline cuando los activos estén listos \textit{o} garantizar una ejecución mínima a una hora límite (p. ej., 06:00 UTC) si una fuente secundaria se retrasa.
+  \item \textbf{Sintaxis declarativa \code{@asset} y eventos externos (\code{AssetWatcher}):} permite definir un activo de datos y la función que lo materializa en una única unidad compacta, así como enlazar activos con colas de mensajes externas (Kafka, SQS) a través del Triggerer.
+  \item \textbf{Vista dual Task / Asset en la UI:} la nueva interfaz React permite alternar entre la vista clásica orientada a DAGs/tareas y un grafo global centrado en \textit{Assets}, mostrando qué flujos producen y consumen cada tabla o artefacto y cuál es su marca temporal de frescura.
+\end{itemize}
+
+El Listing~\ref{lst:airflow3-assets-sdk} ejemplifica el uso idiomático del nuevo Task SDK de Airflow 3.0+ para producir dos \textit{Assets} en capa Silver y disparar automáticamente un cálculo Gold cuando ambos se materializan.
+
+\begin{lstlisting}[style=python, caption={Definición moderna en Airflow 3.0+ usando \texttt{airflow.sdk} y programación reactiva orientada a \texttt{Asset} con operador lógico \texttt{\&}.}, label={lst:airflow3-assets-sdk}]
+from datetime import datetime, timezone
+from airflow.sdk import Asset, dag, task
+
+# Declaracion de activos de datos (URIs canonicos de tablas Lakehouse)
+SILVER_VENTAS = Asset("iceberg://lakehouse/silver/ventas_diarias")
+SILVER_CAMBIOS = Asset("iceberg://lakehouse/silver/tipos_cambio_bce")
+GOLD_FACTURACION = Asset("iceberg://lakehouse/gold/fact_ingresos_eur")
+
+
+@dag(
+    dag_id="ingesta_silver_ventas",
+    schedule="@daily",
+    start_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    catchup=False,
+    tags=["medallion", "silver", "airflow3"],
+)
+def pipeline_silver_ventas():
+    @task(outlets=[SILVER_VENTAS])
+    def materializar_ventas(logical_date=None) -> str:
+        fecha = logical_date.strftime("%Y-%m-%d")
+        # Delegacion a motor externo (Spark / SQL) -> devuelve solo metadato
+        return f"iceberg://lakehouse/silver/ventas_diarias?dt={fecha}"
+
+    materializar_ventas()
+
+
+@dag(
+    dag_id="calculo_gold_facturacion",
+    # Disparo reactivo solo cuando AMBOS activos Silver se hayan actualizado
+    schedule=(SILVER_VENTAS & SILVER_CAMBIOS),
+    start_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    catchup=False,
+    tags=["medallion", "gold", "asset-driven"],
+)
+def pipeline_gold_facturacion():
+    @task(outlets=[GOLD_FACTURACION])
+    def consolidar_ingresos() -> dict[str, str]:
+        # Ejecuta consulta MERGE en Warehouse usando ambos activos Silver
+        return {"tabla_destino": GOLD_FACTURACION.uri, "estado": "ok"}
+
+    consolidar_ingresos()
+
+
+pipeline_silver_ventas()
+pipeline_gold_facturacion()
+\end{lstlisting}
+
+\subsection{Backfills nativos en el Scheduler y nueva UI en React}\label{subsec:backfills-ui-react}
+
+Junto con la re-arquitectura del núcleo, Airflow 3.0 introduce dos mejoras operativas de impacto inmediato en el día a día:
+\begin{itemize}
+  \item \textbf{Backfills nativos gestionados por el Scheduler:} en Airflow 2.x, reprocesar un rango histórico de fechas mediante \code{airflow dags backfill} ejecutaba un proceso CLI síncrono y bloqueante en la máquina donde se invocaba, completamente desvinculado del Scheduler y difícil de monitorizar o cancelar limpiamente desde la interfaz web. En Airflow 3.0, los \textit{backfills} pasan a ser objetos persistentes de primera clase gestionados de forma asíncrona por el propio Scheduler: se lanzan desde la UI o la REST API v2, permiten fijar concurrencia máxima (\code{max\_active\_runs}), elegir políticas de reprocesamiento (\code{reprocess\_behavior}: solo fechas faltantes, fallidas o todas), y pausar o cancelar el lote en tiempo real con barra de progreso.
+  \item \textbf{Nueva interfaz de usuario en React + TypeScript:} reescrita desde cero abandonando las plantillas heredadas de Flask-AppBuilder/Jinja. Se comunica de forma puramente asíncrona contra el API Server (FastAPI), ofreciendo tiempos de carga drásticamente inferiores en DAGs de cientos de tareas, navegación fluida del grafo, selector de versiones históricas de DAG, consola nativa de \textit{backfills} y vista de linaje de \textit{Assets}. Además, en ejecuciones manuales o disparadas por eventos externos, \code{logical\_date} pasa a ser opcional (\code{None}), eliminando el artificio histórico de inventar intervalos de datos ficticios para flujos puramente reactivos.
+\end{itemize}
+
+\subsection{Comparativa Airflow 2.10 frente a Airflow 3.0+ y guía práctica de migración}\label{subsec:migracion-airflow3}
+
+La Tabla~\ref{tab:airflow2-vs-airflow3} resume de manera estructurada las diferencias esenciales entre ambas generaciones.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa arquitectónica y funcional entre Apache Airflow 2.10 y Apache Airflow 3.0+.}
+\label{tab:airflow2-vs-airflow3}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{2.8cm} Y Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Dimensión} &
+\textcolor{white}{\sffamily\bfseries Apache Airflow 2.10.x} &
+\textcolor{white}{\sffamily\bfseries Apache Airflow 3.0+ (2025--2026)} \\
+\midrule
+Comunicación de tareas & Acceso directo SQL de los workers a la Metadata DB. & Aislamiento total vía \textbf{Task Execution API} (HTTP/JSON + JWT). \\
+\rowcolor{TableStripe}
+Servidor web y API & Webserver (Gunicorn + Flask / FAB), REST API v1. & \textbf{API Server} unificado (FastAPI/ASGI), REST API v2. \\
+Interfaz de usuario & Plantillas servidor Flask + componentes React parciales. & UI reescrita desde cero en \textbf{React + TypeScript} (vista Task/Asset). \\
+\rowcolor{TableStripe}
+Autoría e imports & Imports dispersos (\code{airflow.decorators}, \code{airflow.models}\ldots). & \textbf{Task SDK} unificado (\code{from airflow.sdk import ...}). \\
+Soporte de lenguajes & Exclusivamente Python en workers nativos. & \textbf{Multi-lenguaje} (Python, Go, Rust, Java vía OpenAPI). \\
+\rowcolor{TableStripe}
+Versionado de DAGs & Inexistente (sobrescritura en caliente, riesgo \textit{split-brain}). & \textbf{DAG Versioning} nativo + \textbf{DAG Bundles} (\code{GitDagBundle}). \\
+Scheduling por datos & \code{Dataset} básico (2.4+), expresiones limitadas. & \textbf{\code{Asset}} de primera clase, lógica \code{\&}/\code{|}, \code{@asset}, eventos. \\
+\rowcolor{TableStripe}
+Gestión de Backfills & Comando CLI síncrono externo al Scheduler. & \textbf{Nativos en Scheduler}, lanzables y cancelables vía UI/API. \\
+\code{catchup} por defecto & \code{True} (frecuente causa de disparos accidentales). & \code{False} (\code{catchup\_by\_default = False}). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsubsection{Guía práctica de migración de Airflow 2.10 a Airflow 3.0+}
+
+Migrar un repositorio empresarial desde Airflow 2.10 a 3.0+ no requiere reescribir la lógica de negocio de los pipelines, pero exige atender seis cambios incompatibles (\textit{breaking changes}) clave:
+
+\begin{enumerate}
+  \item \textbf{Unificación del parámetro de calendario:} \code{schedule\_interval} y \code{timetable} se eliminan definitivamente; todos los DAGs deben emplear el parámetro unificado \code{schedule} (aceptando expresiones cron, \code{timedelta}, \code{Timetable}, \code{Asset} o \code{None}).
+  \item \textbf{Eliminación de \code{days\_ago}:} la función auxiliar \code{airflow.utils.dates.days\_ago} ---presente en numerosos ejemplos heredados--- desaparece por inducir fechas de inicio móviles no deterministas. Debe reemplazarse por fechas explícitas con zona horaria (\code{datetime(2026, 1, 1, tzinfo=timezone.utc)} o \code{pendulum.datetime(2026, 1, 1, tz="UTC")}).
+  \item \textbf{Prohibición del acceso directo a la Metadata DB en tareas:} cualquier tarea que importe \code{airflow.utils.session}, \code{create\_session} o realice consultas ORM directas sobre \code{DagRun} o \code{TaskInstance} fallará en Airflow 3. Debe refactorizarse para usar el contexto inyectado, el Task SDK (\code{Variable.get}, \code{Connection.get}) o la REST API v2.
+  \item \textbf{Actualización de importaciones al Task SDK y \code{Asset}:} migrar progresivamente de \code{airflow.decorators} a \code{airflow.sdk}, sustituir \code{Dataset} por \code{Asset} y trasladar operadores de núcleo que pasaron a proveedores estándar (\pkg{apache-airflow-providers-standard}, como \code{PythonOperator} o \code{BashOperator}).
+  \item \textbf{Revisión de \code{catchup} y \code{logical\_date}:} verificar si algún DAG productivo dependía implícitamente del antiguo valor por defecto \code{catchup=True} y comprobar que los DAGs disparados manualmente no asuman que \code{logical\_date} nunca es \code{None}.
+  \item \textbf{Auditoría automatizada con \pkg{ruff} y las reglas \code{AIR30}:} la comunidad de Airflow y el equipo de \pkg{ruff} mantienen un conjunto oficial de reglas estáticas (\code{AIR30} / \code{AIR301} / \code{AIR302}) capaz de escanear miles de ficheros Python en milisegundos, señalar exactamente cada importación o patrón incompatible con Airflow 3 e incluso aplicar correcciones automáticas seguras (Listing~\ref{lst:ruff-air30}).
+\end{enumerate}
+
+\begin{lstlisting}[style=bash, caption={Auditoría y refactorización asistida de DAGs de Airflow 2.10 hacia Airflow 3.0+ mediante \texttt{ruff} y las reglas \texttt{AIR30}.}, label={lst:ruff-air30}]
+# 1. Instalar ruff (linter ultrarrapido en Rust con soporte oficial Airflow 3)
+pip install ruff
+
+# 2. Auditar toda la carpeta dags/ buscando incompatibilidades con Airflow 3.0+
+ruff check --select AIR30 dags/
+
+# 3. Previsualizar correcciones automaticas disponibles sin modificar ficheros
+ruff check --select AIR30 --fix --diff dags/
+
+# 4. Aplicar las correcciones seguras (ej. schedule_interval -> schedule, imports SDK)
+ruff check --select AIR30 --fix dags/
+
+# 5. Integrar en CI/CD como puerta de calidad para impedir regresiones a APIs 2.x
+ruff check --select AIR30,AIR31 --output-format=github dags/
+\end{lstlisting}
+
+\begin{examplebox}[Estrategia recomendada de transición en una empresa real]
+En una plataforma productiva con 250 DAGs en Airflow 2.10, la migración de mínimo riesgo sigue cuatro pasos incrementales: (1) actualizar primero a la última versión menor \textbf{2.10.x} para activar las advertencias de deprecación y asegurar compatibilidad de Python 3.11/3.12; (2) añadir \code{ruff check --select AIR30} al pipeline de CI y resolver primero las reglas críticas (acceso directo a Metadata DB, \code{days\_ago} y \code{schedule\_interval}); (3) validar el nuevo clúster de Airflow 3.0+ en un entorno de \textit{staging} paralelo con un \code{GitDagBundle} y probar tanto la migración de base de datos (\code{airflow db migrate}) como las conexiones a través de la Task Execution API; y (4) realizar la transición de producción por dominios o en ventana controlada con respaldo completo de PostgreSQL.
+\end{examplebox}
+
+Una vez comprendida la maquinaria interna de Airflow 2.10 y 3.0+, sus ejecutores y sus modelos de despliegue, el siguiente capítulo se adentra en el arte de diseñar pipelines robustos: anatomía de DAGs, TaskFlow API, gestión responsable de XComs, idempotencia, \textit{backfills}, ramificación condicional, \code{TaskGroups}, mapeo dinámico y pruebas automatizadas.

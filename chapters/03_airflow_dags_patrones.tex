@@ -1,0 +1,1153 @@
+% ============================================================================
+% 03_airflow_dags_patrones.tex — Capítulo 3: Diseño Profesional de DAGs,
+% TaskFlow API y Patrones Avanzados
+% ============================================================================
+
+\chapter{Diseño Profesional de DAGs, TaskFlow API y Patrones Avanzados}\label{chap:airflow-dags}
+\chaptermark{Diseño de DAGs y TaskFlow API}
+
+Diseñar flujos de trabajo en Apache Airflow trasciende con creces la mera concatenación de scripts en Python. Un DAG (\textit{Directed Acyclic Graph}) en producción es un artefacto de ingeniería de software que convive con fallos intermitentes de red, reprocesamientos históricos masivos, ventanas temporales estrictas, cambios de esquema aguas arriba y múltiples equipos operando sobre un mismo clúster compartido. Cuando un DAG se escribe sin rigor arquitectónico ---por ejemplo, transfiriendo volúmenes masivos de datos por XCom, rompiendo la idempotencia o ejecutando consultas en tiempo de parseo---, el problema no solo afecta a ese pipeline concreto, sino que degrada la estabilidad global del \textit{Scheduler} y de la base de datos de metadatos.
+
+A lo largo de este capítulo se recorre de forma sistemática el diseño profesional de DAGs en Apache Airflow, cubriendo tanto el estándar ampliamente desplegado en producción (\textbf{Airflow 2.10.x}) como las mejoras estructurales introducidas por \textbf{Airflow 3.0+} \badge[TealAccent]{Airflow 3} mediante el nuevo \textit{Task SDK} y los \textit{backfills} nativos. Comenzaremos por la anatomía formal de un DAG y el ciclo de vida de sus instancias de tarea; compararemos la sintaxis clásica con la \textit{TaskFlow API}; analizaremos la mecánica interna de XComs y el principio rector «Airflow orquesta, no procesa»; formalizaremos la idempotencia y la semántica temporal; dominaremos patrones avanzados de control de flujo (\textit{Branching}, \textit{Trigger Rules}, \textit{TaskGroups}, \textit{Dynamic Task Mapping} y \textit{Setup/Teardown}); y cerraremos con resiliencia frente a errores y pruebas automatizadas con \pkg{pytest}.
+
+% ----------------------------------------------------------------------------
+\section{Anatomía de un DAG: conceptos fundamentales y ciclo de vida de una tarea}\label{sec:anatomia-dag}
+% ----------------------------------------------------------------------------
+
+Desde una perspectiva formal, un DAG en Airflow es un grafo dirigido y acíclico $G = (V, E)$, donde cada vértice $v \in V$ representa una \textbf{tarea} (\textit{Task}) atómica de trabajo y cada arista dirigida $(u, v) \in E$ establece una restricción de precedencia temporal o de datos: la tarea $v$ (\textit{downstream}) solo puede evaluarse tras la resolución de $u$ (\textit{upstream}). La condición de aciclicidad garantiza que no exista ningún camino cerrado $v_1 \rightarrow v_2 \rightarrow \dots \rightarrow v_k \rightarrow v_1$, lo cual asegura que el grafo admite al menos un ordenamiento topológico finito y determinista y evita interbloqueos circulares en tiempo de planificación.
+
+En la práctica de ingeniería resulta imprescindible distinguir cuatro abstracciones del modelo de dominio de Airflow que con frecuencia se confunden en los primeros proyectos:
+
+\begin{description}
+  \item[DAG (Definición lógica).] Es el plano estático del flujo de trabajo, declarado en código Python e interpretado periódicamente por el \textit{DAG Processor}. Contiene el identificador único (\code{dag\_id}), la política de planificación (\code{schedule}), la fecha de inicio (\code{start\_date}), los argumentos por defecto y la topología de tareas.
+  \item[Task (Tarea).] Es la unidad mínima de ejecución dentro de un DAG, instanciada a partir de un operador (\code{BaseOperator}) o decorada con \code{@task}. Define \textit{qué} se ejecuta (un script Python, una consulta SQL, un comando Bash, un sensor externo o la invocación de un clúster Spark), junto con su política de reintentos, \textit{pool} de recursos y tiempo máximo de ejecución.
+  \item[DagRun (Ejecución del DAG).] Es una instancia concreta de un DAG asociada a una ventana temporal (\textit{data interval}), un evento de datos (\textit{Asset/Dataset}) o un disparo manual. Cada \code{DagRun} se identifica de forma única por el par \code{(dag\_id, run\_id)} y mantiene su propio estado global (\code{queued}, \code{running}, \code{success}, \code{failed}).
+  \item[TaskInstance (TI).] Es la materialización de una \code{Task} dentro de un \code{DagRun} específico. Su clave primaria en la base de datos de metadatos es la cuádrupla \code{(dag\_id, task\_id, run\_id, map\_index)}, donde \code{map\_index} toma el valor \code{-1} en tareas estáticas y un entero no negativo ($0, 1, \dots, N-1$) en tareas generadas dinámicamente mediante \textit{Dynamic Task Mapping}.
+\end{description}
+
+\subsection{Máquina de estados de una TaskInstance}
+
+El verdadero comportamiento en tiempo de ejecución de un pipeline se comprende siguiendo la máquina de estados finitos de una \code{TaskInstance}. Cada transición está gobernada de manera cooperativa por tres actores principales: el \textbf{Scheduler} (que evalúa dependencias, \textit{pools} y \textit{trigger rules}), el \textbf{Executor / Worker} (que ejecuta la lógica del operador) y, en tareas asíncronas, el \textbf{Triggerer} (que supervisa esperas no bloqueantes).
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=1.25cm and 1.35cm,
+  state/.style={
+    rectangle, rounded corners=5pt, draw=PrimaryAccent, line width=0.9pt,
+    fill=InfoBg, text=PrimaryDark, font=\sffamily\footnotesize\bfseries,
+    align=center, minimum width=2.4cm, minimum height=0.85cm, inner sep=5pt,
+    drop shadow={opacity=0.12}
+  },
+  okstate/.style={state, draw=EmeraldAccent, fill=ModernBg, text=EmeraldAccent},
+  warnstate/.style={state, draw=AmberAccent, fill=WarnBg, text=AmberAccent},
+  errstate/.style={state, draw=CrimsonAccent, fill=CrimsonAccent!8!white, text=CrimsonAccent},
+  neutralstate/.style={state, draw=MutedGray, fill=SoftBg, text=SlateText},
+  tealstate/.style={state, draw=TealAccent, fill=ModernBg, text=PrimaryDark},
+  lbl/.style={font=\sffamily\scriptsize, text=SlateText, fill=white, inner sep=1.8pt}
+]
+  % Fila principal horizontal
+  \node[neutralstate] (none) {\code{none}\\{\scriptsize (Sin evaluar)}};
+  \node[state, right=1.3cm of none] (sched) {\code{scheduled}\\{\scriptsize (Lista para cola)}};
+  \node[state, right=1.3cm of sched] (queued) {\code{queued}\\{\scriptsize (En Executor)}};
+  \node[state, right=1.3cm of queued] (running) {\code{running}\\{\scriptsize (En Worker)}};
+  \node[okstate, right=1.5cm of running] (success) {\code{success}\\{\scriptsize (Completada)}};
+
+  % Estados superiores (bucles de retorno a scheduled)
+  \node[warnstate, above=1.45cm of queued] (retry) {\code{up\_for\_retry}\\{\scriptsize (Espera backoff)}};
+  \node[tealstate, above=1.45cm of running] (deferred) {\code{deferred}\\{\scriptsize (En Triggerer)}};
+  \node[warnstate, above=1.45cm of sched] (resched) {\code{up\_for\_reschedule}\\{\scriptsize (Sensor libre)}};
+
+  % Estados inferiores (desvíos y fallos)
+  \node[neutralstate, below=1.45cm of sched] (skipped) {\code{skipped}\\{\scriptsize (Rama omitida)}};
+  \node[errstate, below=1.45cm of queued] (upfail) {\code{upstream\_failed}\\{\scriptsize (Fallo previo)}};
+  \node[errstate, below=1.45cm of running] (failed) {\code{failed}\\{\scriptsize (Sin reintentos)}};
+
+  % Flujo principal
+  \draw[flowarrow] (none) -- node[lbl, above=3pt] {Dependencias OK} (sched);
+  \draw[flowarrow] (sched) -- node[lbl, above=3pt] {Slot libre} (queued);
+  \draw[flowarrow] (queued) -- node[lbl, above=3pt] {Worker arranca} (running);
+  \draw[tealarrow] (running) -- node[lbl, above=3pt] {Exit 0} (success);
+
+  % Transiciones desde running a estados de reentrada
+  \draw[flowarrow, color=AmberAccent] (running.north west) -- node[lbl, sloped, above=1pt] {Error y retries $>$ 0} (retry.south east);
+  \draw[flowarrow, color=AmberAccent] (retry.south west) -- node[lbl, left=2pt] {Tras \code{retry\_delay}} (sched.north east);
+
+  \draw[tealarrow] (running.north) -- node[lbl, right=2pt] {\code{self.defer()}} (deferred.south);
+  \draw[tealarrow] (deferred.west) -- ++(-0.5,0) |- ([yshift=6pt]retry.north) -| ([xshift=14pt]sched.north)
+    node[pos=0.18, lbl, above=2pt] {\code{TriggerEvent}};
+
+  \draw[dashedarrow, color=AmberAccent] (running.145) |- ([yshift=-20pt]resched.east) -- (resched.east)
+    node[pos=0.18, lbl, below=1pt, fill=white, inner sep=1pt] {\code{mode="reschedule"}};
+  \draw[dashedarrow, color=AmberAccent] (resched.south) -- node[lbl, left=2pt, fill=white, inner sep=1pt] {\code{poke\_interval}} (sched.north);
+
+  % Transiciones de fallo y salto
+  \draw[flowarrow, color=CrimsonAccent] (running.south) -- node[lbl, right=2pt] {Retries agotados} (failed.north);
+  \draw[dashedarrow, color=MutedGray] (none.south) |- node[pos=0.75, lbl, below=2pt] {Branch / ShortCircuit} (skipped.west);
+  \draw[dashedarrow, color=CrimsonAccent] (none.south east) |- node[pos=0.72, lbl, above=2pt] {Upstream \code{failed}} (upfail.west);
+  \draw[dashedarrow, color=MutedGray] (running.south west) to[bend left=12] node[lbl, sloped, above=2pt, fill=white, inner sep=1pt] {\code{AirflowSkipException}} (skipped.north east);
+\end{tikzpicture}%
+}
+\caption{Máquina de estados de una \code{TaskInstance} en Apache Airflow. Las rutas superiores representan pausas o reintentos que liberan el \textit{worker slot} y retornan a \code{scheduled}; las inferiores recogen terminaciones por fallo o descarte condicional.}
+\label{fig:ti-state-machine}
+\end{figure}
+
+La Figura~\ref{fig:ti-state-machine} pone de manifiesto una propiedad arquitectónica esencial: ni \code{up\_for\_retry}, ni \code{up\_for\_reschedule}, ni \code{deferred} ocupan un \textit{worker slot} de cómputo. Comprender esta diferencia resulta decisivo a la hora de dimensionar clústeres de producción y evitar bloqueos de capacidad, cuestión que retomaremos en detalle al analizar sensores y operadores diferibles en el Capítulo~\ref{chap:airflow-conectividad}. Asimismo, conviene observar que una tarea puede terminar en \code{skipped} tanto antes de arrancar (cuando el \textit{Scheduler} evalúa que una tarea previa de \textit{branching} la descartó) como durante su propia ejecución (si el código lanza explícitamente \code{AirflowSkipException} o si un sensor expira con \code{soft\_fail=True}).
+
+\subsection{Taxonomía de Operadores}
+
+En Airflow, cada tarea encapsula su lógica mediante un \textbf{Operador}, subclase de \code{BaseOperator}. Aunque el ecosistema supera el millar de operadores distribuidos en paquetes \textit{Providers}, conceptualmente todos se agrupan en tres grandes categorías funcionales, resumidas en la Tabla~\ref{tab:taxonomia-operadores}.
+
+\begin{table}[htbp]
+\centering
+\caption{Taxonomía funcional de operadores en Apache Airflow y ejemplos representativos.}
+\label{tab:taxonomia-operadores}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.8cm} L{4.1cm} Y L{3.3cm}@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Categoría} &
+\textcolor{white}{\sffamily\bfseries Ejemplos clásicos} &
+\textcolor{white}{\sffamily\bfseries Responsabilidad principal} &
+\textcolor{white}{\sffamily\bfseries Consideración de diseño} \\
+\midrule
+\textbf{Operadores de Acción} &
+\code{PythonOperator}, \code{BashOperator}, \code{SQLExecuteQueryOperator}, \code{KubernetesPodOperator} &
+Ejecutan una operación concreta: lógica Python, comandos de sistema, sentencias DDL/DML en bases de datos o trabajos en motores externos (Spark, dbt, contenedores). &
+Preferir \code{@task} para Python ligero y operadores dedicados para motores externos. \\
+\rowcolor{TableStripe}
+\textbf{Operadores de Transferencia} &
+\code{S3ToRedshiftOperator}, \code{GCSToBigQueryOperator}, \code{PostgresToGCSOperator}, \code{S3ToSFTPOperator} &
+Orquestan el movimiento de datos desde un sistema origen hacia un destino, aprovechando cuando es posible comandos nativos (\code{COPY}, \code{LOAD JOB}) sin pasar datos por el worker. &
+Verificar si la transferencia ocurre \textit{server-side} o si transita por memoria del worker. \\
+\textbf{Sensores} &
+\code{FileSensor}, \code{HttpSensor}, \code{ExternalTaskSensor}, \code{S3KeySensor} &
+Evalúan periódicamente un predicado externo y bloquean el avance del flujo aguas abajo hasta que se cumple la condición o expira el \code{timeout}. &
+Usar \code{mode="reschedule"} o \code{deferrable=True} para no agotar \textit{worker slots}. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Un matiz arquitectónico relevante sobre los operadores de transferencia: operadores nativos como \code{S3ToRedshiftOperator} o \code{GCSToBigQueryOperator} no descargan los ficheros en el worker de Airflow, sino que envían a Redshift o BigQuery una instrucción de carga directa (\code{COPY} o \textit{Load Job}) desde el almacenamiento de objetos. Por el contrario, transferencias genéricas como \code{GenericTransfer} sí leen filas hacia el proceso Python del worker y deben emplearse únicamente con volúmenes reducidos.
+
+\subsection{Definición de dependencias entre tareas}
+
+La topología de un DAG se expresa enlazando tareas mediante los operadores de desplazamiento de bits sobrecargados en \code{BaseOperator}: \code{>>} (\textit{downstream}, equivalente a \code{set\_downstream()}) y \code{<<} (\textit{upstream}, equivalente a \code{set\_upstream()}). Cuando una tarea debe abrir o cerrar varias ramas en paralelo (\textit{fan-out} y \textit{fan-in}), Airflow permite combinar tareas individuales con listas: \code{t1 >> [t2, t3] >> t4}.
+
+Sin embargo, intentar enlazar directamente dos listas mediante \code{[t1, t2] >> [t3, t4]} produce un \code{TypeError} en Python porque el operador \code{>>} no está definido entre objetos \code{list}. Para construir grafos complejos de manera limpia y legible, Airflow ofrece tres utilidades en \code{airflow.models.baseoperator} (exportadas también en \code{airflow.sdk} en Airflow 3 \badge[TealAccent]{Airflow 3}): \code{chain()}, \code{chain\_linear()} y \code{cross\_downstream()}.
+
+\begin{lstlisting}[style=python, caption={Patrones de declaración de dependencias: bitshift, \code{chain}, \code{chain\_linear} y \code{cross\_downstream}.}, label={lst:dependencias-helpers}]
+from airflow.models.baseoperator import chain, chain_linear, cross_downstream
+
+# 1. Dependencia secuencial y fan-out / fan-in con operadores bitshift
+ingesta >> [validar_esquema, validar_nulos] >> transformar >> cargar
+
+# Equivalente con << (orden inverso: cargar depende de transformar)
+cargar << transformar
+
+# 2. chain(): enlaza listas del MISMO tamano elemento a elemento (1 a 1)
+#    Produce: t0 -> t1 -> t3 -> t5  y  t0 -> t2 -> t4 -> t5
+chain(t0, [t1, t2], [t3, t4], t5)
+
+# 3. cross_downstream(): producto cartesiano entre dos listas (N x M aristas)
+#    Produce: (t1->t3), (t1->t4), (t2->t3), (t2->t4)
+cross_downstream(from_tasks=[t1, t2], to_tasks=[t3, t4])
+
+# 4. chain_linear(): como cross_downstream, pero encadenable en multiples etapas
+#    y soporta listas de distinto tamano sin requerir cardinalidad identica
+chain_linear(t0, [t1, t2], [t3, t4, t5], t6)
+\end{lstlisting}
+
+Elegir entre \code{chain()} y \code{chain\_linear()} evita errores sutiles de topología: mientras \code{chain([a1, a2], [b1, b2])} crea únicamente dos aristas paralelas ($a_1 \rightarrow b_1$ y $a_2 \rightarrow b_2$), \code{chain\_linear([a1, a2], [b1, b2])} crea una barrera completa de sincronización con cuatro aristas, impidiendo que $b_1$ arranque si $a_2$ aún no ha finalizado.
+
+% ----------------------------------------------------------------------------
+\section{Sintaxis clásica vs. TaskFlow API (Airflow 2.x y Airflow 3 Task SDK)}\label{sec:sintaxis-taskflow}
+% ----------------------------------------------------------------------------
+
+Históricamente, todos los DAGs de Airflow se escribían instanciando explícitamente clases de operadores dentro de un gestor de contexto \code{with DAG(...) as dag:}. A partir de Airflow 2.0 se introdujo la \textbf{TaskFlow API} (\code{@dag} y \code{@task}), que transformó drásticamente la ergonomía de desarrollo al permitir escribir tareas Python como funciones puras cuyas firmas expresan directamente tanto las dependencias como el paso de metadatos por XCom. En Airflow 3.0 \badge[TealAccent]{Airflow 3}, esta aproximación se consolida en el nuevo paquete desacoplado \code{airflow.sdk}.
+
+\subsection{El primer DAG en sintaxis clásica}
+
+El Listado~\ref{lst:dag-clasico} muestra un flujo lineal mínimo de tres etapas en sintaxis clásica con \code{PythonOperator}. Este estilo sigue presente en numerosos repositorios heredados y resulta imprescindible conocerlo para mantener sistemas existentes y depurar código legado.
+
+\begin{lstlisting}[style=python, caption={Definición de un DAG en sintaxis clásica de Airflow 2.x con \code{PythonOperator}.}, label={lst:dag-clasico}]
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.utils.dates import days_ago
+
+
+def start_task():
+    print("Starting wf")
+
+
+def process_data():
+    number = 5
+    result = number ** 2
+    print(f"processed {number}")
+    return result  # Se empuja automaticamente a XCom bajo key="return_value"
+
+
+def end_task(**context):
+    # En sintaxis clasica, consumir la salida previa exige xcom_pull explicito
+    ti = context["ti"]
+    received = ti.xcom_pull(task_ids="process_data_task")
+    print(f"ended wf. Received result: {received}")
+
+
+with DAG(
+    dag_id="dag-name",
+    default_args={
+        "owner": "owner-name",
+        "retries": 1,
+    },
+    description="Primer flujo de ejemplo en sintaxis clasica",
+    schedule_interval="@hourly",
+    start_date=days_ago(1),
+    catchup=False,
+) as dag:
+    start = PythonOperator(
+        task_id="start_task",
+        python_callable=start_task,
+    )
+
+    process = PythonOperator(
+        task_id="process_data_task",
+        python_callable=process_data,
+    )
+
+    end = PythonOperator(
+        task_id="end_task",
+        python_callable=end_task,
+    )
+
+    # Declaracion explicita de dependencias
+    start >> process >> end
+\end{lstlisting}
+
+Obsérvense tres fricciones inherentes al enfoque clásico: (1) la verbosidad repetitiva de declarar por separado la función Python y el envoltorio \code{PythonOperator}; (2) el acoplamiento frágil basado en cadenas literales (\code{task\_ids="process\_data\_task"}) para recuperar valores mediante \code{ti.xcom\_pull()}; y (3) la desconexión entre dependencias de datos y dependencias de orden, lo que obliga a mantener sincronizados los operadores \code{>>} con los nombres de tarea invocados dentro de las funciones.
+
+\subsection{El mismo flujo con TaskFlow API}
+
+La \textit{TaskFlow API} elimina ese código repetitivo convirtiendo funciones anotadas con \code{@task} en factorías de operadores que devuelven objetos proxy de tipo \code{XComArg}. Al pasar el objeto \code{process\_result} como argumento de \code{end\_task(input\_data=process\_result)}, Airflow infiere de manera automática dos hechos simultáneos: que existe una arista \code{process\_data -> end\_task} y que el argumento \code{input\_data} debe resolverse en tiempo de ejecución desde el XCom producido por \code{process\_data}.
+
+\begin{lstlisting}[style=python, caption={Reescritura del DAG con TaskFlow API en Airflow 2.x (\code{@dag} y \code{@task}).}, label={lst:dag-taskflow}]
+from airflow.decorators import dag, task
+from airflow.utils.dates import days_ago
+
+
+@task
+def start_task():
+    print("Starting wf")
+    # La primera tarea no necesita devolver nada si solo registra trazas
+
+
+@task
+def process_data() -> int:
+    number = 5
+    result = number ** 2
+    print(f"processed {number}")
+    return result
+
+
+@task
+def end_task(input_data: int):
+    print(f"Ended wf. Received result: {input_data}")
+
+
+@dag(
+    dag_id="dag-name-taskflow",
+    default_args={
+        "owner": "owner-name",
+        "retries": 1,
+    },
+    description="Flujo equivalente usando TaskFlow API",
+    schedule_interval="@hourly",
+    start_date=days_ago(1),
+    catchup=False,
+    tags=["taskflow", "example"],
+)
+def taskflow_dag_example():
+    start_result = start_task()
+    process_result = process_data()
+    end_task(input_data=process_result)
+
+    # Dependencia de orden explicita cuando no hay paso de datos
+    start_result >> process_result
+
+
+# Es imprescindible invocar la funcion decorada a nivel de modulo
+taskflow_dag = taskflow_dag_example()
+\end{lstlisting}
+
+Conviene prestar atención a las dos últimas líneas del Listado~\ref{lst:dag-taskflow}: en primer lugar, como \code{start\_task} no pasa ningún argumento a \code{process\_data}, debemos declarar la precedencia explícita \code{start\_result >> process\_result}; en segundo lugar, olvidar invocar \code{taskflow\_dag\_example()} al final del fichero es un fallo muy habitual que impide que el \textit{DAG Processor} descubra el objeto \code{DAG} resultante.
+
+\begin{modernbox}[Migración limpia a Airflow 3: Task SDK, \code{schedule} y \code{pendulum}]
+El código de los Listados~\ref{lst:dag-clasico} y~\ref{lst:dag-taskflow} mantiene deliberadamente dos construcciones ampliamente presentes en material de Airflow 2.x que han sido deprecadas o eliminadas en \textbf{Airflow 3.0} \badge[TealAccent]{Airflow 3}:
+\begin{enumerate}
+  \item \code{airflow.utils.dates.days\_ago} \badge[AmberAccent]{Deprecado}: eliminada en Airflow 3 porque producía una \code{start\_date} dinámica que se desplazaba en cada ciclo de parseo del DAG, provocando anomalías en el cálculo de intervalos y \textit{backfills}. Debe sustituirse siempre por una fecha estática con zona horaria explícita mediante \code{pendulum.datetime(...)}.
+  \item \code{schedule\_interval} \badge[AmberAccent]{Deprecado}: sustituido desde Airflow 2.4 y eliminado en Airflow 3 en favor del parámetro unificado \code{schedule} (que acepta expresiones cron, \textit{presets}, \code{timedelta}, \code{Timetable} o listas de \code{Asset}).
+  \item \code{airflow.decorators}: en Airflow 3 los decoradores de autoría pasan al paquete ligero y estable \code{airflow.sdk}, que desacopla el código del usuario de las tripas internas del \textit{Scheduler}.
+\end{enumerate}
+
+\begin{lstlisting}[style=python, caption={Versión modernizada y limpia para Airflow 3.0+ usando \code{airflow.sdk} y \code{pendulum}.}, label={lst:dag-airflow3}]
+import pendulum
+from airflow.sdk import dag, task
+
+
+@dag(
+    dag_id="dag_name_airflow3",
+    default_args={"owner": "data-platform", "retries": 2},
+    description="Flujo limpio compatible con Airflow 3 Task SDK",
+    schedule="@hourly",
+    start_date=pendulum.datetime(2026, 4, 1, tz="UTC"),
+    catchup=False,
+    tags=["taskflow", "airflow3"],
+)
+def airflow3_pipeline():
+    @task
+    def start_task() -> None:
+        print("Starting workflow")
+
+    @task
+    def process_data() -> int:
+        number = 5
+        return number ** 2
+
+    @task
+    def end_task(input_data: int) -> None:
+        print(f"Ended workflow. Received result: {input_data}")
+
+    t_start = start_task()
+    t_proc = process_data()
+    t_start >> t_proc
+    end_task(input_data=t_proc)
+
+
+airflow3_pipeline()
+\end{lstlisting}
+\end{modernbox}
+
+\subsection{Interoperabilidad entre operadores clásicos y funciones \texorpdfstring{\code{@task}}{@task}}
+
+Un malentendido frecuente consiste en creer que adoptar \textit{TaskFlow} impide usar operadores declarativos como \code{SQLExecuteQueryOperator}, \code{BashOperator} o \code{KubernetesPodOperator}. En realidad, los pipelines profesionales combinan ambos estilos de forma natural: los operadores de los \textit{Providers} se encargan de interactuar con motores SQL o infraestructura externa, mientras que las funciones \code{@task} resuelven el pegamento de metadatos, validaciones ligeras o decisiones de control.
+
+El puente entre ambos mundos es el atributo \code{.output} de cualquier operador clásico, que devuelve un objeto \code{XComArg} directamente consumible por una función \code{@task}. En sentido inverso, cualquier objeto \code{XComArg} devuelto por una función \code{@task} puede inyectarse en un parámetro con soporte de plantillas Jinja (\code{template\_fields}) de un operador clásico.
+
+\begin{lstlisting}[style=python, caption={Combinación de operadores clásicos (\code{SQLExecuteQueryOperator}, \code{BashOperator}) y \code{@task} mediante \code{.output}.}, label={lst:mezcla-operadores}]
+import pendulum
+from airflow.decorators import dag, task
+from airflow.operators.bash import BashOperator
+from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+
+
+@dag(
+    dag_id="etl_mixto_taskflow_clasico",
+    schedule="@daily",
+    start_date=pendulum.datetime(2026, 4, 1, tz="UTC"),
+    catchup=False,
+    tags=["sql", "interoperabilidad"],
+)
+def etl_mixto():
+    # Operador clasico: consulta el conteo de filas de la particion del dia
+    contar_registros = SQLExecuteQueryOperator(
+        task_id="contar_registros",
+        conn_id="warehouse_pg",
+        sql="SELECT COUNT(*) FROM ventas_staging WHERE fecha = '{{ ds }}';",
+        do_xcom_push=True,
+    )
+
+    # Funcion @task consumiendo classic_operator.output (XComArg)
+    @task
+    def construir_comando_exportacion(resultado_sql: list) -> str:
+        total = resultado_sql[0][0]
+        if total == 0:
+            raise ValueError("Particion vacia en ventas_staging")
+        print(f"Validados {total} registros para exportacion.")
+        return f"s3://analytics-lake/ventas/records={total}"
+
+    ruta_destino = construir_comando_exportacion(contar_registros.output)
+
+    # Operador clasico consumiendo la salida de @task en un campo templateable
+    notificar_cli = BashOperator(
+        task_id="registrar_manifest",
+        bash_command='echo "Manifest generado en: $TARGET_URI para {{ ds }}"',
+        env={"TARGET_URI": ruta_destino},
+    )
+
+    # Dependencia implicita ya creada via XComArg: contar_registros -> ruta_destino -> notificar_cli
+    notificar_cli
+
+
+etl_mixto()
+\end{lstlisting}
+
+\subsection{Despliegue de DAGs, DAG Processor y reglas de oro del \textit{top-level code}}
+
+Para desplegar un flujo de trabajo en una instancia local o de desarrollo basta con situar el fichero Python en \code{\$AIRFLOW\_HOME/dags/mi\_dag.py}. En despliegues productivos sobre Kubernetes o entornos gestionados, esa carpeta se sincroniza automáticamente desde un repositorio Git mediante un \textit{sidecar} \code{git-sync}, volúmenes compartidos o, a partir de Airflow 3 \badge[TealAccent]{Airflow 3}, a través de \textbf{DAG Bundles} versionados.
+
+Internamente, el proceso \textbf{DAG Processor} (\code{DagFileProcessorManager}) escanea el directorio \code{dags/} de forma periódica (cada \code{30} segundos por defecto en \code{min\_file\_process\_interval}, mientras \code{dag\_dir\_list\_interval} descubre archivos nuevos cada \code{300} segundos), ejecuta cada archivo Python en un subproceso aislado, extrae los objetos \code{DAG} definidos en el ámbito global y serializa su estructura en JSON dentro de la tabla \code{serialized\_dag} de la base de datos de metadatos. La interfaz web y el \textit{Scheduler} leen posteriormente esa representación serializada para operar con baja latencia.
+
+Cuando el repositorio contiene módulos auxiliares, pruebas unitarias o borradores que no definen DAGs, debe añadirse un fichero \code{.airflowignore} en la raíz de \code{dags/} con patrones \code{regex} (o \code{glob} si se configura \code{dag\_ignore\_file\_syntax = glob}), evitando desperdiciar ciclos de CPU escaneando ficheros irrelevantes:
+
+\begin{lstlisting}[style=bash, caption={Ejemplo de \code{.airflowignore} para excluir pruebas, utilidades compartidas y archivos temporales.}, label={lst:airflowignore}]
+# Ignorar pruebas, cache de Python y paquetes de helpers
+tests/.*
+helpers/.*
+__pycache__/.*
+.*\.tmp$
+wip_.*
+\end{lstlisting}
+
+\begin{warningbox}[Regla de oro del \textit{top-level code}: nunca ejecutes I/O fuera de una tarea]
+Todo el código escrito en el nivel superior de un fichero DAG ---es decir, fuera de las funciones ejecutadas por \code{@task} o de los métodos \code{execute()} de los operadores--- se ejecuta \textbf{íntegramente cada 30 segundos} en el \textit{DAG Processor}. En consecuencia:
+\begin{itemize}
+  \item \textbf{NUNCA} abras conexiones a bases de datos (\code{PostgresHook().get\_records(...)}), realices peticiones HTTP a APIs externas ni listes buckets S3 en el \textit{top-level code}. Con 200 ficheros DAG, una sola consulta SQL en el parseo generaría 400 consultas por minuto sobre tu base de datos las 24 horas del día, saturando el \textit{pool} de conexiones y provocando \textit{timeouts} de parseo (\code{dagbag\_import\_timeout}).
+  \item \textbf{NUNCA} llames a \code{Variable.get("mi\_clave")} a nivel de módulo; cada llamada abre una consulta contra la Metadata DB de Airflow. Emplea plantillas Jinja (\code{\{\{ var.value.mi\_clave \}\}}) o invoca \code{Variable.get()} dentro del cuerpo de la tarea en tiempo de ejecución.
+  \item \textbf{Difiere las importaciones pesadas} (\pkg{pandas}, \pkg{torch}, \pkg{scikit-learn}, \pkg{boto3}) dentro de la función \code{@task} para mantener el tiempo de parseo por fichero por debajo de $0.5$--$1.5$ segundos.
+\end{itemize}
+\end{warningbox}
+
+% ----------------------------------------------------------------------------
+\section{XComs y el anti-patrón crítico: Airflow orquesta, no procesa}\label{sec:xcoms-antipatron}
+% ----------------------------------------------------------------------------
+
+Debido a que en arquitecturas distribuidas (\code{CeleryExecutor}, \code{KubernetesExecutor}) dos tareas consecutivas del mismo DAG se ejecutan habitualmente en procesos, contenedores o máquinas físicas completamente distintas, las variables en memoria Python no se comparten entre tareas. Para comunicar pequeños fragmentos de estado entre ellas, Airflow implementa el mecanismo \textbf{XCom} (\textit{Cross-Communication}).
+
+\subsection{Mecánica interna, serialización y límites reales}
+
+Cada vez que una tarea retorna un valor en \textit{TaskFlow} o invoca explícitamente \code{ti.xcom\_push(key="metricas", value=...)}, Airflow serializa el objeto (por defecto en formato \textbf{JSON}; la serialización \code{pickle} está deshabilitada por motivos de seguridad frente a ejecución remota de código) y lo inserta como una fila en la tabla \code{xcom} de la base de datos de metadatos, indexada por \code{(dag\_id, task\_id, run\_id, map\_index, key)}. Cuando una tarea devuelve un diccionario y se decora con \code{@task(multiple\_outputs=True)}, Airflow descompone automáticamente cada par clave-valor en su propia entrada XCom para permitir consumos selectivos.
+
+\begin{lstlisting}[style=python, caption={Paso correcto de metadatos ligeros mediante XCom en TaskFlow API.}, label={lst:xcom-ligero}]
+from airflow.decorators import task
+
+
+@task(multiple_outputs=True)
+def extract_metadata() -> dict:
+    # Solo metadatos ligeros: unos pocos bytes en formato JSON
+    return {"user_id": 42, "value": 123.45, "currency": "EUR"}
+
+
+@task
+def apply_vat(value: float, rate: float = 0.21) -> float:
+    return round(value * (1.0 + rate), 2)  # IVA espanol (21%)
+\end{lstlisting}
+
+El almacenamiento de XComs en la base de datos transaccional de metadatos impone límites estrictos tanto físicos como operativos:
+\begin{itemize}
+  \item \textbf{PostgreSQL:} aunque el tipo \code{BYTEA}/\code{JSONB} soporta técnicamente hasta 1\,GB mediante almacenamiento TOAST, Airflow recomienda y acota operativamente los payloads a \textbf{$\le$ 48\,KB} (y varios entornos gestionados imponen topes explícitos en ese orden) para evitar hinchamiento de tablas, bloqueos de \textit{autovacuum} y degradación en las consultas del \textit{Scheduler}.
+  \item \textbf{MySQL / MariaDB:} la columna \code{BLOB} estándar impone un límite físico estricto de \textbf{64\,KB} ($65\,535$ bytes), lanzando inmediatamente una excepción de truncado si se supera.
+  \item \textbf{SQLite} (solo desarrollo local): no presenta un tope bajo estricto, lo que induce una falsa sensación de seguridad que luego falla de forma abrupta al promocionar el DAG a producción.
+\end{itemize}
+
+\subsection{Custom XCom Backends con almacenamiento de objetos}
+
+En aquellos escenarios acotados donde sí conviene pasar objetos estructurados de tamaño intermedio (por ejemplo, listas de miles de identificadores para mapeo dinámico o pequeños diccionarios de evaluación) sin sobrecargar la Metadata DB, Airflow permite sustituir el \textit{backend} por defecto mediante \code{XComObjectStorageBackend}, incluido en el proveedor oficial \pkg{apache-airflow-providers-common-io}.
+
+Su diseño híbrido resulta especialmente inteligente: cualquier valor cuyo tamaño serializado sea inferior a un umbral configurable (\code{threshold}) permanece en la base de datos de metadatos para conservar latencia mínima; si supera el umbral, el \textit{backend} serializa y comprime transparentemente el payload en S3, GCS o Azure Blob Storage y guarda únicamente el puntero URI en la tabla \code{xcom}.
+
+\begin{lstlisting}[style=bash, caption={Configuración de \code{XComObjectStorageBackend} en S3 con umbral de 100\,KB y compresión gzip.}, label={lst:xcom-backend-config}]
+# Activacion del Custom XCom Backend basado en Object Storage
+export AIRFLOW__CORE__XCOM_BACKEND="airflow.providers.common.io.xcom.backend.XComObjectStorageBackend"
+
+# Prefijo remoto utilizando la Connection "aws_default"
+export AIRFLOW__COMMON_IO__XCOM_OBJECTSTORAGE_PATH="s3://aws_default@analytics-xcom-bucket/airflow/xcom"
+
+# Umbral en bytes: <= 100 KB en Metadata DB; > 100 KB en S3
+export AIRFLOW__COMMON_IO__XCOM_OBJECTSTORAGE_THRESHOLD="102400"
+
+# Compresion opcional para reducir trafico de red y coste de almacenamiento
+export AIRFLOW__COMMON_IO__XCOM_OBJECTSTORAGE_COMPRESSION="gzip"
+\end{lstlisting}
+
+Un detalle operativo que nunca debe omitirse al habilitar un \textit{XCom Backend} externo es configurar una \textbf{regla de ciclo de vida} (\textit{Lifecycle Policy}) en el bucket remoto (por ejemplo, expiración automática a los 14 o 30 días), ya que Airflow no purga automáticamente los objetos antiguos almacenados en S3 cuando se eliminan metadatos históricos.
+
+\subsection{El anti-patrón crítico: Airflow orquesta, no procesa}
+
+Incluso disponiendo de un \textit{Custom XCom Backend}, utilizar Airflow como motor de procesamiento distribuido constituye el error arquitectónico más frecuente y costoso en equipos que se inician con la herramienta.
+
+\begin{warningbox}[Principio arquitectónico fundamental: Airflow orquesta, no procesa]
+Apache Airflow es el \textbf{director de orquesta}: decide \textit{qué} se ejecuta, \textit{cuándo}, en \textit{qué orden} y \textit{cómo reaccionar} ante fallos. El \textbf{cómputo pesado} (\textit{cómo} se transforman gigabytes o terabytes de datos) debe delegarse en motores diseñados para ello: \textbf{Apache Spark}, \textbf{BigQuery}, \textbf{Snowflake}, \textbf{dbt}, \textbf{Trino} o trabajos aislados en contenedores con \code{KubernetesPodOperator}.
+
+Cargar un \code{DataFrame} de 10\,GB en un worker de Airflow provoca errores \code{OOMKilled} (agotamiento de memoria RAM), contiende recursos con el resto de tareas del clúster y rompe la resiliencia del planificador. Entre tareas de Airflow \textbf{se pasan referencias} (URIs de S3/GCS, nombres de tablas, fechas de partición o identificadores de ejecución), \textbf{nunca los datos en bruto}.
+\end{warningbox}
+
+El Listado~\ref{lst:xcom-mal-vs-bien} contrasta el anti-patrón directo frente al patrón basado en referencias de almacenamiento externo, ampliando el escenario clásico de ingesta y limpieza en formato Parquet.
+
+\begin{lstlisting}[style=python, caption={Anti-patrón (DataFrame por XCom) frente al patrón correcto (paso de URIs en almacenamiento de objetos).}, label={lst:xcom-mal-vs-bien}]
+# ============================================================================
+# MAL: Cargar un dataset masivo en memoria y devolverlo por XCom
+#      Falla por serializacion JSON, limite de 48/64 KB y OOM en el worker.
+# ============================================================================
+@task
+def extract_bad():
+    import pandas as pd
+    df = pd.read_parquet("s3://analytics-lake/huge_dataset/")  # 10 GB en RAM
+    return df  # ERROR: no es JSON-serializable y colapsaria la Metadata DB
+
+
+# ============================================================================
+# BIEN: Persistir en almacenamiento intermedio (Parquet) y pasar solo la URI
+#       En volumenes mayores (> 1 GB), la lectura/escritura se delega en
+#       Spark, DuckDB en contenedor aislado, dbt o SQL nativo del warehouse.
+# ============================================================================
+@task
+def extract_good(ds: str | None = None) -> str:
+    import pandas as pd
+
+    staging_uri = f"s3://analytics-lake/staging/ventas/dt={ds}/raw.parquet"
+    df = read_incremental_partition_from_source(ds)
+    df.to_parquet(staging_uri, index=False, compression="snappy")
+    # Solo se serializa una cadena de ~60 bytes en XCom
+    return staging_uri
+
+
+@task
+def transform_good(input_uri: str, ds: str | None = None) -> dict:
+    import pandas as pd
+
+    df = pd.read_parquet(input_uri)
+    df_clean = df.dropna(subset=["order_id", "amount"]).drop_duplicates()
+    output_uri = f"s3://analytics-lake/clean/ventas/dt={ds}/clean.parquet"
+    df_clean.to_parquet(output_uri, index=False, compression="snappy")
+
+    return {
+        "output_uri": output_uri,
+        "row_count": int(len(df_clean)),
+        "partition_dt": ds,
+    }
+\end{lstlisting}
+
+% ----------------------------------------------------------------------------
+\section{Idempotencia, determinismo, Jinja y la semántica temporal}\label{sec:idempotencia-tiempo}
+% ----------------------------------------------------------------------------
+
+La confianza en una plataforma de datos depende de que cualquier ejecución pasada pueda repetirse ---ya sea por un reintento automático tras una caída momentánea de red o por un reprocesamiento histórico (\textit{backfill}) tras corregir una regla de negocio--- sin corromper ni duplicar los resultados.
+
+\subsection{Definición formal de idempotencia y patrones SQL}
+
+En matemáticas e ingeniería de sistemas, una operación $f$ se denomina \textbf{idempotente} si y solo si aplicarla repetidamente produce exactamente el mismo estado final que aplicarla una única vez:
+\begin{equation}
+  f(f(x)) = f(x) \quad \Longrightarrow \quad f^{(n)}(x) = f(x) \quad \forall\, n \in \mathbb{N},\; n \ge 1.
+  \label{eq:idempotencia}
+\end{equation}
+
+En pipelines de datos conviene complementar la idempotencia con otras dos propiedades:
+\begin{itemize}
+  \item \textbf{Determinismo:} ante la misma ventana de entrada $x_1 = x_2$, la tarea produce siempre la misma salida $f(x_1) = f(x_2)$. Por esta razón, nunca debe filtrarse por \code{NOW()} o \code{datetime.now()} dentro de una consulta SQL; siempre debe filtrarse por la fecha lógica del intervalo (\code{\{\{ ds \}\}} o \code{\{\{ data\_interval\_start \}\}}).
+  \item \textbf{Atomicidad:} si una tarea falla a mitad de escritura, el destino no debe quedar en un estado parcialmente escrito. Esto se garantiza envolviendo el borrado e inserción en una única transacción SQL o utilizando sobrescritura atómica de particiones (Delta Lake, Apache Iceberg, BigQuery \code{WRITE\_TRUNCATE} sobre decorador de partición \code{tabla\$20260420}).
+\end{itemize}
+
+El Listado~\ref{lst:sql-idempotencia} compara tres patrones SQL crecientes en robustez. Nótese la sutil ventaja del tercer patrón sobre el segundo: si un registro existente en el origen fue eliminado o anulado retroactivamente para la fecha \code{\{\{ ds \}\}}, un \code{ON CONFLICT DO UPDATE} o \code{MERGE} sin cláusula \code{WHEN NOT MATCHED BY SOURCE THEN DELETE} mantendría filas «fantasma» obsoletas, mientras que la sustitución atómica de la partición garantiza una réplica exacta del estado para ese día.
+
+\begin{lstlisting}[style=sql, caption={Comparativa de tres patrones SQL frente a la idempotencia ante reintentos y reprocesamientos.}, label={lst:sql-idempotencia}]
+-- 1. MAL (no idempotente): cada reintento duplica las filas de la misma fecha
+INSERT INTO ventas_diarias (fecha, tienda_id, total_eur)
+SELECT fecha, tienda_id, SUM(importe)
+FROM ventas_raw
+WHERE fecha = CURRENT_DATE;  -- Tambien rompe el determinismo en backfills!
+
+
+-- 2. BIEN (upsert idempotente en PostgreSQL; equivalente a MERGE ANSI):
+--    Seguro ante reintentos, pero no elimina filas borradas en el origen.
+INSERT INTO ventas_diarias (fecha, tienda_id, total_eur)
+SELECT DATE('{{ ds }}'), tienda_id, SUM(importe)
+FROM ventas_raw
+WHERE event_ts >= '{{ data_interval_start }}'
+  AND event_ts <  '{{ data_interval_end }}'
+GROUP BY tienda_id
+ON CONFLICT (fecha, tienda_id)
+DO UPDATE SET total_eur = EXCLUDED.total_eur;
+
+
+-- 3. MEJOR (sobrescritura atomica de particion por {{ ds }}):
+--    Totalmente idempotente, determinista y limpia registros obsoletos.
+BEGIN;
+
+DELETE FROM ventas_diarias
+WHERE fecha = DATE('{{ ds }}');
+
+INSERT INTO ventas_diarias (fecha, tienda_id, total_eur)
+SELECT DATE('{{ ds }}'), tienda_id, SUM(importe)
+FROM ventas_raw
+WHERE event_ts >= '{{ data_interval_start }}'
+  AND event_ts <  '{{ data_interval_end }}'
+GROUP BY tienda_id;
+
+COMMIT;
+\end{lstlisting}
+
+\subsection{La «confusión de fechas»: \textit{wall-clock time}, \texorpdfstring{\code{logical\_date}}{logical\_date} y \textit{data interval}}
+
+Uno de los conceptos que más errores provoca entre ingenieros nuevos en Airflow es comprender por qué un DAG con planificación diaria (\code{schedule="@daily"}) asignado a la fecha lógica \code{2026-04-20} se lanza en realidad el \textbf{21 de abril a las 00:00 UTC}. La razón es estrictamente lógica y proviene de la naturaleza del procesamiento \textit{batch}: no es posible agregar el total de ventas del 20 de abril hasta que el último segundo del día 20 haya concluido.
+
+Por ello, Airflow distingue rigurosamente cuatro marcas temporales:
+\begin{itemize}
+  \item \textbf{\code{data\_interval\_start}:} inicio inclusivo del intervalo de datos que la ejecución debe procesar (en nuestro ejemplo, \code{2026-04-20 00:00:00 UTC}).
+  \item \textbf{\code{data\_interval\_end}:} fin exclusivo del intervalo de datos (\code{2026-04-21 00:00:00 UTC}).
+  \item \textbf{\code{logical\_date}} (denominada históricamente \code{execution\_date} en Airflow 1.x/2.0): fecha canónica que etiqueta el \code{DagRun} y coincide con \code{data\_interval\_start} en ejecuciones planificadas por calendario.
+  \item \textbf{\textit{Wall-clock time}} (o \code{run\_after} / \code{start\_date} del \code{DagRun}): la hora real del reloj del sistema en la que el \textit{Scheduler} dispara físicamente el trabajo (inmediatamente a partir de \code{data\_interval\_end}).
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  tick/.style={draw=PrimaryDark, line width=1pt},
+  intervalbox/.style={rectangle, rounded corners=3pt, minimum height=0.85cm, align=center, font=\sffamily\scriptsize\bfseries}
+]
+  % Eje temporal horizontal
+  \draw[-{Stealth[length=7pt, width=5pt]}, line width=1.2pt, color=PrimaryDark] (0,0) -- (15.5,0)
+    node[right, font=\sffamily\scriptsize\bfseries, text=PrimaryDark] {Tiempo (UTC)};
+
+  % Ticks de dias
+  \foreach \x/\lbl in {1.0/19 abr 00:00, 5.2/20 abr 00:00, 9.4/21 abr 00:00, 13.6/22 abr 00:00} {
+    \draw[tick] (\x, 0.18) -- (\x, -0.18);
+    \node[below=5pt, text=SlateText] at (\x, -0.18) {\lbl};
+  }
+
+  % Bloques de intervalos
+  \node[intervalbox, draw=LightBorder, fill=SoftBg, text=MutedGray, minimum width=4.0cm]
+    at (3.1, 0.72) {Intervalo 19 abr\\(\code{ds = 2026-04-19})};
+
+  \node[intervalbox, draw=PrimaryAccent, line width=1.1pt, fill=InfoBg, text=PrimaryDark, minimum width=4.0cm]
+    at (7.3, 0.72) {Intervalo 20 abr\\(\code{ds = 2026-04-20})};
+
+  \node[intervalbox, draw=LightBorder, fill=SoftBg, text=MutedGray, minimum width=4.0cm]
+    at (11.5, 0.72) {Intervalo 21 abr\\(\code{ds = 2026-04-21})};
+
+  % Llave superior resaltando el intervalo de datos del 20 de abril
+  \draw[decorate, decoration={brace, amplitude=6pt, raise=3pt}, line width=1pt, color=PrimaryAccent]
+    (5.25, 1.25) -- (9.35, 1.25)
+    node[midway, above=10pt, align=center, text=PrimaryDark, font=\sffamily\scriptsize\bfseries]
+    {Ventana procesada por el DagRun\\ \code{[data\_interval\_start, data\_interval\_end)}};
+
+  % Anotaciones de logical_date y wall-clock trigger
+  \draw[flowarrow, color=TealAccent] (5.2, -1.35) -- (5.2, -0.68);
+  \node[tealbox, text width=3.9cm, below=0.05cm] at (5.2, -1.35)
+    {\code{logical\_date} y \code{data\_interval\_start}\\{\scriptsize \code{2026-04-20T00:00:00Z}}};
+
+  \draw[flowarrow, color=AmberAccent] (9.4, -1.35) -- (9.4, -0.68);
+  \node[amberbox, text width=4.4cm, below=0.05cm] at (9.4, -1.35)
+    {Disparo real (\textit{Wall-clock}) y \code{data\_interval\_end}\\{\scriptsize El Scheduler lanza el run el \code{2026-04-21T00:00:00Z}}};
+
+  % Anotacion de tiempo de ejecucion del run
+  \draw[line width=3pt, color=AmberAccent] (9.4, 0.0) -- (10.35, 0.0);
+  \node[above=2pt, font=\sffamily\tiny\bfseries, text=AmberAccent] at (9.9, 0.02) {Ejecución};
+\end{tikzpicture}%
+}
+\caption{Relación entre \code{logical\_date}, \code{data\_interval\_start}, \code{data\_interval\_end} y el tiempo real de disparo (\textit{wall-clock time}) para un DAG con \code{schedule="@daily"}.}
+\label{fig:timeline-fechas}
+\end{figure}
+
+\subsection{Macros y plantillas Jinja esenciales}
+
+Para inyectar estas variables temporales y de contexto sin acoplar el código al reloj del sistema, Airflow integra el motor de plantillas \textbf{Jinja2}. En los operadores clásicos, cualquier atributo listado en la tupla \code{template\_fields} de la clase (por ejemplo, \code{sql}, \code{bash\_command}, \code{filepath} o \code{op\_kwargs}) se renderiza justo antes de ejecutar la tarea en el worker. En funciones decoradas con \code{@task}, el contexto está disponible directamente declarando los nombres de macro como argumentos opcionales (p.~ej., \code{def cargar(ds=None, data\_interval\_start=None):}) o invocando \code{get\_current\_context()}. La Tabla~\ref{tab:jinja-macros} recoge las macros imprescindibles en el día a día.
+
+\begin{table}[htbp]
+\centering
+\caption{Referencia de macros Jinja esenciales en Airflow (ejemplo para el intervalo diario del 20 de abril de 2026).}
+\label{tab:jinja-macros}
+\small
+\begin{tabularx}{\textwidth}{@{}L{4.1cm} L{4.2cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Macro Jinja} &
+\textcolor{white}{\sffamily\bfseries Valor renderizado} &
+\textcolor{white}{\sffamily\bfseries Caso de uso típico} \\
+\midrule
+\code{\{\{ ds \}\}} & \code{2026-04-20} & Filtros SQL por fecha, prefijos Hive \code{dt=2026-04-20}. \\
+\rowcolor{TableStripe}
+\code{\{\{ ds\_nodash \}\}} & \code{20260420} & Decoradores de partición en BigQuery (\code{tabla\$20260420}) o ficheros planos. \\
+\code{\{\{ ts \}\}} & \code{2026-04-20T00:00:00+00:00} & Consultas con marca de tiempo ISO-8601 completa. \\
+\rowcolor{TableStripe}
+\code{\{\{ data\_interval\_start \}\}} & \code{2026-04-20 00:00:00+00:00} & Límite inferior inclusivo en cargas incrementales (\code{>=}). \\
+\code{\{\{ data\_interval\_end \}\}} & \code{2026-04-21 00:00:00+00:00} & Límite superior exclusivo (\code{<}); también admite \code{.strftime(...)}. \\
+\rowcolor{TableStripe}
+\code{\{\{ prev\_ds \}\}} & \code{2026-04-19} & Comparativas día contra día anterior (\textit{DoD}) o ventanas móviles. \\
+\code{\{\{ params.umbral \}\}} & Valor de \code{params=\{"umbral": 0.9\}} & Parametrización tipada editable desde la UI al lanzar runs manuales. \\
+\rowcolor{TableStripe}
+\code{\{\{ var.value.entorno \}\}} & \code{prod} & Lectura diferida de Variables de Airflow sin penalizar el parseo. \\
+\code{\{\{ var.json.cfg.bucket \}\}} & \code{lake-prod} & Acceso directo a campos dentro de una Variable almacenada como JSON. \\
+\rowcolor{TableStripe}
+\code{\{\{ conn.warehouse\_pg.host \}\}} & \code{pg-prod.internal} & Inyección segura de atributos no secretos de una Connection. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Backfill, \texorpdfstring{\code{catchup}}{catchup} y protección de sistemas origen}
+
+El parámetro \code{catchup} controla cómo reacciona el \textit{Scheduler} cuando se activa por primera vez un DAG cuya \code{start\_date} está en el pasado (o tras reanudarlo después de varios días pausado). Si un DAG diario se activa el 20 de abril de 2026 con \code{start\_date=pendulum.datetime(2026, 3, 21, tz="UTC")} y \code{catchup=True}, Airflow creará automáticamente 30 \code{DagRuns}, uno para cada día del intervalo perdido. Con \code{catchup=False}, el \textit{Scheduler} genera únicamente el intervalo más reciente.
+
+\begin{infobox}[Regla práctica de \code{catchup} y cambio de valor por defecto en Airflow 3]
+En desarrollo y prototipado debe configurarse siempre \code{catchup=False}. En producción solo conviene activar \code{catchup=True} cuando el diseño de todas las tareas ha demostrado ser estrictamente idempotente y el negocio exige continuidad histórica sin huecos. En \textbf{Airflow 3.0} \badge[TealAccent]{Airflow 3}, el ajuste global \code{core.catchup\_by\_default} pasó de \code{True} a \code{False} para prevenir avalanchas accidentales de ejecuciones al desplegar DAGs nuevos.
+\end{infobox}
+
+Al lanzar un \textit{backfill} sobre meses o años de histórico, una precaución crítica consiste en proteger las bases de datos transaccionales origen (OLTP) y las cuotas de APIs externas frente a picos de concurrencia. Airflow ofrece tres válvulas complementarias:
+\begin{itemize}
+  \item \code{max\_active\_runs=3} a nivel de DAG: limita cuántos \code{DagRuns} históricos pueden ejecutarse simultáneamente.
+  \item \code{max\_active\_tasks=8} a nivel de DAG y \code{pool="oltp\_readonly"} en tareas de extracción: impiden saturar el número máximo de conexiones concurrentes de la fuente.
+  \item \code{depends\_on\_past=True}: obliga a que la instancia del día $d$ espere a que la misma tarea del día $d-1$ haya terminado en \code{success} (imprescindible en acumuladores secuenciales o tablas \textit{SCD Tipo 2}).
+\end{itemize}
+
+\begin{lstlisting}[style=bash, caption={Ejecución de backfills: comando síncrono en Airflow 2.x frente a backfill nativo gestionado por el Scheduler en Airflow 3.0+.}, label={lst:backfill-cli}]
+# Airflow 2.x: el backfill corre en un proceso local de la CLI (dificil de monitorizar)
+airflow dags backfill \
+    --start-date 2026-03-01 \
+    --end-date 2026-03-31 \
+    --reset-dagruns \
+    ventas_diarias
+
+# Airflow 3.0+: backfill nativo, asincrono, trazable y pausable desde la UI y API REST
+airflow backfill create \
+    --dag-id ventas_diarias \
+    --from-date 2026-03-01 \
+    --to-date 2026-03-31 \
+    --max-active-runs 3 \
+    --reprocess-behavior failed \
+    --run-backwards
+\end{lstlisting}
+
+El salto cualitativo en Airflow 3 \badge[TealAccent]{Airflow 3} es notable: los \textit{backfills} dejan de ejecutarse como procesos huérfanos desde una terminal SSH para convertirse en entidades de primera clase gestionadas por el propio \textit{Scheduler}, con soporte para orden inverso (\code{--run-backwards}, procesando primero los días más recientes para negocio), políticas de reprocesamiento (\code{none}, \code{failed}, \code{completed}) y control completo de pausa y cancelación desde la interfaz web.
+
+% ----------------------------------------------------------------------------
+\section{Control de flujo avanzado}\label{sec:control-flujo-avanzado}
+% ----------------------------------------------------------------------------
+
+Los flujos reales en entornos productivos rara vez son cadenas lineales rígidas. Exigen bifurcaciones condicionales en función de la calidad o volumen de los datos, modularización visual cuando el grafo supera las decenas de nodos, paralelismo dinámico cuyo grado solo se conoce en tiempo de ejecución y gestión segura de infraestructura efímera.
+
+\subsection{Branching condicional, cortocircuitos y Trigger Rules}
+
+El decorador \code{@task.branch} (equivalente al clásico \code{BranchPythonOperator}) permite decidir dinámicamente qué tarea o lista de tareas aguas abajo deben ejecutarse. Su función devuelve el \code{task\_id} (o una lista de \code{task\_id}s) de la rama seleccionada; Airflow marca de inmediato todas las demás ramas hermanas como \code{skipped}.
+
+Sin embargo, este patrón esconde una trampa clásica cuando las ramas vuelven a converger en una tarea común posterior (por ejemplo, \code{consolidar\_reporte}). Debido a que la \textbf{Trigger Rule} por defecto de toda tarea es \code{all\_success}, y el estado \code{skipped} se propaga en cascada, la tarea de convergencia nunca llegará a ejecutarse si al menos uno de sus padres fue omitido. La solución profesional consiste en asignar \code{trigger\_rule=TriggerRule.NONE\_FAILED\_MIN\_ONE\_SUCCESS} al nodo de unión.
+
+\begin{lstlisting}[style=python, caption={Branching condicional con \code{@task.branch} y convergencia segura mediante \code{TriggerRule}.}, label={lst:branching-trigger-rules}]
+import pendulum
+from airflow.decorators import dag, task
+from airflow.utils.trigger_rule import TriggerRule
+
+
+@dag(
+    dag_id="segmentacion_clientes_branching",
+    schedule="@daily",
+    start_date=pendulum.datetime(2026, 4, 1, tz="UTC"),
+    catchup=False,
+    tags=["branching", "trigger-rules"],
+)
+def pipeline_branching():
+    @task
+    def calcular_volumen_diario() -> int:
+        # Simulacion de metrica obtenida desde staging
+        return 250
+
+    @task.branch
+    def elegir_rama(valor: int) -> str:
+        if valor > 100:
+            return "rama_alta"
+        return "rama_baja"
+
+    @task
+    def rama_alta() -> str:
+        print("Volumen elevado: procesamos como lote prioritario en Spark")
+        return "ruta_premium"
+
+    @task
+    def rama_baja() -> str:
+        print("Volumen reducido: procesamos como lote estandar ligero")
+        return "ruta_estandar"
+
+    # SIN trigger_rule personalizada, esta tarea quedaria SKIPPED siempre!
+    @task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    def notificar_cierre() -> None:
+        print("Cierre confirmado tras completar al menos una rama sin fallos.")
+
+    volumen = calcular_volumen_diario()
+    decision = elegir_rama(volumen)
+    alta = rama_alta()
+    baja = rama_baja()
+
+    decision >> [alta, baja] >> notificar_cierre()
+
+
+pipeline_branching()
+\end{lstlisting}
+
+Complementariamente, cuando en lugar de escoger entre varias rutas se desea \textbf{detener completamente} la ejecución del resto del DAG si una precondición no se cumple (por ejemplo, en días festivos bursátiles o cuando el fichero de entrada viene sin novedades), resulta más limpio emplear \code{@task.short\_circuit} (o \code{ShortCircuitOperator}). Si la función devuelve \code{False}, todas las tareas aguas abajo se marcan como \code{skipped}. Si además deseamos que una tarea final de auditoría con \code{trigger\_rule="all\_done"} sí se ejecute pese al cortocircuito, basta con pasar \code{ignore\_downstream\_trigger\_rules=False} al decorador.
+
+La Tabla~\ref{tab:trigger-rules} sintetiza todas las \textit{Trigger Rules} relevantes de \code{airflow.utils.trigger\_rule.TriggerRule}.
+
+\begin{table}[htbp]
+\centering
+\caption{Referencia de \textit{Trigger Rules} en Apache Airflow y criterios de selección.}
+\label{tab:trigger-rules}
+\small
+\begin{tabularx}{\textwidth}{@{}L{4.4cm} L{5.0cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Trigger Rule} &
+\textcolor{white}{\sffamily\bfseries Condición de disparo (padres directos)} &
+\textcolor{white}{\sffamily\bfseries Caso de uso recomendado} \\
+\midrule
+\code{all\_success} \textit{(defecto)} & Todos los padres terminan en \code{success}. & Flujos estándar estrictamente dependientes. \\
+\rowcolor{TableStripe}
+\code{none\_failed\_min\_one\_success} & Ningún padre en \code{failed}/\code{upstream\_failed} y al menos uno en \code{success}. & \textbf{Unión tras \code{@task.branch}}: evita ejecutarse si la rama elegida falló. \\
+\code{all\_done} & Todos los padres han terminado, sin importar si fallaron o fueron omitidos. & Limpieza de recursos (aunque hoy se prefiere \textit{Setup/Teardown}) o reporte final incondicional. \\
+\rowcolor{TableStripe}
+\code{one\_failed} & Al menos un padre falla (no espera al resto). & Alerta inmediata en Slack/PagerDuty o captura de diagnóstico ante error. \\
+\code{none\_failed} & Ningún padre falló (todos en \code{success} o \code{skipped}). & Pasos finales válidos incluso si todas las ramas previas se omitieron. \\
+\rowcolor{TableStripe}
+\code{one\_success} & Al menos un padre termina en \code{success} (dispara sin esperar a otros). & Estrategias de carrera o fuentes redundantes de ingesta. \\
+\code{all\_failed} & Todos los padres están en \code{failed} o \code{upstream\_failed}. & Rutas de contingencia (\textit{fallback}) cuando fallan primario y secundario. \\
+\rowcolor{TableStripe}
+\code{always} & Se ejecuta independientemente del estado de cualquier padre. & Tareas de auditoría o telemetría garantizada. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{TaskGroups: modularización de DAGs complejos}
+
+Cuando un pipeline corporativo crece por encima de 30 o 40 tareas, la vista de grafo en la interfaz web se vuelve inmanejable y el código pierde estructura. En Airflow 1.x se intentó resolver este problema con \code{SubDagOperator}, un enfoque que creaba DAGs anidados con graves riesgos de interbloqueo (\textit{deadlock}) en los \textit{worker slots} y que fue oficialmente deprecado en Airflow 2 y eliminado en Airflow 3 \badge[AmberAccent]{Deprecado}.
+
+Su reemplazo moderno son los \textbf{TaskGroups} (\code{@task\_group} o gestor de contexto \code{TaskGroup}), una abstracción puramente lógica y visual que no añade sobrecarga al \textit{Scheduler}, prefija automáticamente los identificadores (\code{validaciones.check\_schema}) y permite colapsar y expandir subgrafos completos en la UI. Además, los \code{TaskGroups} pueden anidarse y combinarse con el operador \code{>>} como si fuesen bloques atómicos.
+
+\begin{lstlisting}[style=python, caption={Modularización de un pipeline de calidad y carga mediante \code{@task\_group}.}, label={lst:taskgroups}]
+import pendulum
+from airflow.decorators import dag, task, task_group
+
+
+@dag(
+    dag_id="warehouse_ventas_modular",
+    schedule="@daily",
+    start_date=pendulum.datetime(2026, 4, 1, tz="UTC"),
+    catchup=False,
+    tags=["taskgroup", "calidad-datos"],
+)
+def warehouse_ventas_dag():
+    @task
+    def extraer_lote(ds: str | None = None) -> str:
+        return f"s3://analytics-lake/staging/ventas/dt={ds}/lote.parquet"
+
+    @task_group(group_id="validaciones", tooltip="Controles de contrato de datos")
+    def validar(uri: str):
+        @task
+        def check_schema(path: str) -> None:
+            print(f"Validando esquema de columnas en {path}")
+
+        @task
+        def check_row_count(path: str) -> None:
+            print(f"Verificando umbral minimo de filas en {path}")
+
+        @task
+        def check_nulls(path: str) -> None:
+            print(f"Comprobando nulos en claves primarias de {path}")
+
+        # Las tres validaciones corren en paralelo dentro del grupo
+        check_schema(uri)
+        check_row_count(uri)
+        check_nulls(uri)
+
+    @task_group(group_id="carga", tooltip="Promocion staging -> produccion")
+    def cargar(uri: str):
+        @task
+        def cargar_staging(path: str) -> str:
+            print(f"Cargando {path} en tabla temporal")
+            return "ventas_tmp"
+
+        @task
+        def promover_produccion(tabla_tmp: str) -> None:
+            print(f"Intercambio atomico desde {tabla_tmp} hacia ventas_prod")
+
+        promover_produccion(cargar_staging(uri))
+
+    uri_lote = extraer_lote()
+    # Encadenamiento limpio de TaskGroups completos
+    validar(uri_lote) >> cargar(uri_lote)
+
+
+warehouse_ventas_dag()
+\end{lstlisting}
+
+\subsection{Dynamic Task Mapping: paralelismo dinámico en tiempo de ejecución}
+
+En el diseño clásico de DAGs, el número de tareas debía conocerse de antemano durante el parseo del fichero Python (generación estática con bucles \code{for}). Sin embargo, un patrón omnipresente en ingeniería de datos consiste en descubrir dinámicamente $N$ unidades de trabajo en tiempo de ejecución ---por ejemplo, todos los ficheros llegados hoy a un prefijo de S3, o la lista de clientes activos devuelta por una consulta--- y lanzar una instancia de tarea paralela por cada elemento.
+
+\textbf{Dynamic Task Mapping} (introducido en Airflow 2.3 y consolidado en Airflow 3) resuelve este requisito mediante los métodos \code{.partial()} (para fijar parámetros constantes compartidos por todas las copias) y \code{.expand()} / \code{.expand\_kwargs()} (para desplegar una \code{TaskInstance} con \code{map\_index} $0, 1, \dots, N-1$ por cada elemento de la lista producida aguas arriba). Además, \code{.zip()} permite emparejar dos colecciones dinámicas producidas por tareas distintas antes de expandirlas.
+
+\begin{lstlisting}[style=python, caption={Fan-out y fan-in dinámico sobre ficheros descubiertos en S3 con \code{.partial()}, \code{.expand()} y \code{expand\_kwargs()}.}, label={lst:dynamic-task-mapping}]
+import pendulum
+from airflow.decorators import dag, task
+
+
+@dag(
+    dag_id="ingesta_dinamica_s3",
+    schedule="@hourly",
+    start_date=pendulum.datetime(2026, 4, 1, tz="UTC"),
+    catchup=False,
+    tags=["dynamic-mapping", "s3"],
+)
+def ingesta_dinamica():
+    @task
+    def listar_ficheros_s3(ds: str | None = None) -> list[str]:
+        # En produccion usaria S3Hook.list_keys(bucket, prefix=f"raw/dt={ds}/")
+        return [
+            f"raw/dt={ds}/tienda_madrid.parquet",
+            f"raw/dt={ds}/tienda_barcelona.parquet",
+            f"raw/dt={ds}/tienda_valencia.parquet",
+        ]
+
+    # Limite de concurrencia local para no saturar workers ni cuotas de API
+    @task(max_active_tis_per_dagrun=4)
+    def procesar_fichero(bucket: str, file_key: str) -> dict:
+        print(f"Validando y normalizando s3://{bucket}/{file_key}")
+        return {"key": file_key, "rows": 1250}
+
+    @task
+    def construir_destinos(resultados: list[dict]) -> list[dict]:
+        # Prepara diccionarios heterogeneos para expand_kwargs
+        return [
+            {"origen": r["key"], "tabla_destino": f"silver_{idx}"}
+            for idx, r in enumerate(resultados)
+        ]
+
+    @task
+    def publicar_tabla(origen: str, tabla_destino: str) -> str:
+        print(f"Publicando {origen} -> {tabla_destino}")
+        return tabla_destino
+
+    @task
+    def consolidar_resumen(tablas_publicadas: list[str]) -> None:
+        # Fan-in: recibe un iterable LazyXComAccess con todas las salidas
+        lista = list(tablas_publicadas)
+        print(f"Pipeline completado. Tablas actualizadas ({len(lista)}): {lista}")
+
+    claves = listar_ficheros_s3()
+    # Fan-out dinamico: bucket es constante (.partial); file_key varia (.expand)
+    procesados = procesar_fichero.partial(bucket="analytics-raw").expand(file_key=claves)
+
+    # Segundo fan-out con multiples argumentos por instancia (.expand_kwargs)
+    specs = construir_destinos(procesados)
+    publicadas = publicar_tabla.expand_kwargs(specs)
+
+    consolidar_resumen(publicadas)
+
+
+ingesta_dinamica()
+\end{lstlisting}
+
+Desde el punto de vista operativo, conviene recordar que Airflow establece por defecto un límite de seguridad \code{core.max\_map\_length = 1024} instancias mapeadas por tarea para evitar que un fallo en un listado (por ejemplo, devolver $100\,000$ ficheros pequeños) bloquee la base de datos de metadatos. Si el número de elementos supera varios cientos, es preferible agruparlos en micro-lotes (\textit{chunking}) antes de expandir o delegar el paralelismo en un motor distribuido como Spark.
+
+\subsection{Setup y Teardown Tasks: limpieza garantizada de recursos efímeros}
+
+Un patrón habitual en ingeniería de datos y MLOps consiste en aprovisionar infraestructura bajo demanda al inicio del pipeline (un clúster Spark EMR/Dataproc, una instancia con GPU o una tabla temporal), ejecutar múltiples tareas de cómputo sobre ella y destruirla al terminar para contener costes cloud.
+
+Antes de Airflow 2.7, implementar este ciclo de vida mediante \code{trigger\_rule="all\_done"} presentaba dos defectos graves: si la tarea de creación del clúster fallaba, la tarea de destrucción intentaba ejecutarse igualmente; y, peor aún, si el trabajo intermedio fallaba pero la destrucción tenía éxito, el \code{DagRun} podía acabar en estado \code{success}, enmascarando errores críticos.
+
+Las tareas \textbf{Setup} y \textbf{Teardown} (\code{as\_setup()} y \code{as\_teardown()}) resuelven el problema con semántica de ámbito exacta:
+\begin{enumerate}
+  \item La tarea \textit{teardown} se ejecuta \textbf{si y solo si} su tarea \textit{setup} correspondiente terminó con éxito, incluso si cualquiera de las tareas de trabajo intermedias falló o fue omitida.
+  \item El éxito de la tarea \textit{teardown} \textbf{no oculta} el fallo de una tarea de trabajo: el \code{DagRun} seguirá marcándose como \code{failed}.
+  \item Si un operador limpia manualmente una tarea de trabajo para relanzarla desde la UI, Airflow re-ejecuta automáticamente primero su \textit{setup} asociado para recrear el entorno necesario.
+\end{enumerate}
+
+\begin{lstlisting}[style=python, caption={Gestión segura de un clúster efímero con \code{as\_setup()} y \code{as\_teardown()}.}, label={lst:setup-teardown}]
+import pendulum
+from airflow.decorators import dag, task
+
+
+@dag(
+    dag_id="spark_cluster_efimero",
+    schedule="@daily",
+    start_date=pendulum.datetime(2026, 4, 1, tz="UTC"),
+    catchup=False,
+    tags=["setup-teardown", "finops"],
+)
+def cluster_efimero_dag():
+    @task
+    def crear_cluster_emr() -> str:
+        cluster_id = "j-2A9K8EXAMPLE"
+        print(f"Aprovisionando cluster efimero {cluster_id}")
+        return cluster_id
+
+    @task
+    def ejecutar_job_spark(cluster_id: str, ds: str | None = None) -> None:
+        print(f"Ejecutando ETL distribuido en {cluster_id} para {ds}")
+
+    @task
+    def validar_salida_gold(ds: str | None = None) -> None:
+        print(f"Validando metricas finales de la capa Gold para {ds}")
+
+    @task
+    def destruir_cluster_emr(cluster_id: str) -> None:
+        print(f"Terminando cluster {cluster_id} para evitar sobrecostes")
+
+    setup_cluster = crear_cluster_emr()
+    teardown_cluster = destruir_cluster_emr(setup_cluster)
+
+    # El gestor de contexto vincula setup y teardown a todas las tareas internas
+    with setup_cluster.as_setup() >> teardown_cluster.as_teardown():
+        ejecutar_job_spark(setup_cluster) >> validar_salida_gold()
+
+
+cluster_efimero_dag()
+\end{lstlisting}
+
+% ----------------------------------------------------------------------------
+\section{Gestión de errores, reintentos y testing automatizado de DAGs}\label{sec:errores-testing}
+% ----------------------------------------------------------------------------
+
+Un pipeline de producción se mide menos por cómo funciona en el camino feliz que por su comportamiento cuando una API externa devuelve HTTP 429, una base de datos reinicia su nodo primario o un cambio en una rama de Git introduce un error de sintaxis.
+
+\subsection{Resiliencia: reintentos con \textit{backoff} exponencial, \textit{timeouts} y alertas}
+
+Configurar reintentos inteligentes absorbe la mayoría de fallos transitorios sin despertar al equipo de guardia. Cuando múltiples tareas atacan simultáneamente un mismo servicio externo caído, reintentar con intervalos fijos provoca un efecto de estampida (\textit{thundering herd}). Activando \code{retry\_exponential\_backoff=True}, Airflow calcula la espera del intento $k$-ésimo ($k \ge 1$) incorporando crecimiento exponencial y aleatoriedad (\textit{jitter}) acotados por \code{max\_retry\_delay}:
+\begin{equation}
+  \Delta t_k = \min\!\Big(t_{\max},\; d \cdot 2^{k-1} + \varepsilon_k\Big),
+  \label{eq:backoff}
+\end{equation}
+donde $d$ es \code{retry\_delay}, $t_{\max}$ corresponde a \code{max\_retry\_delay} y $\varepsilon_k$ es una perturbación pseudoaleatoria acotada que desincroniza los reintentos concurrentes.
+
+Junto con los reintentos, todo DAG profesional debe fijar siempre límites de tiempo (\code{execution\_timeout} por intento de tarea y \code{dagrun\_timeout} para el flujo completo) para evitar tareas colgadas indefinidamente ocupando recursos, así como notificaciones automáticas mediante \textit{callbacks} o clases \textbf{Notifier} (\code{BaseNotifier}, como \code{SlackWebhookNotifier} o \code{PagerDutyNotifier}).
+
+\begin{modernbox}[Observabilidad de retrasos: de \code{sla\_miss} a \textit{Deadline Alerts}]
+El mecanismo histórico \code{sla} y \code{on\_sla\_miss\_callback} de Airflow 2.x presentaba limitaciones conocidas (solo evaluaba respecto a \code{data\_interval\_end} y no soportaba alertas por inicio tardío ni ventanas de negocio flexibles). En \textbf{Airflow 3} \badge[TealAccent]{Airflow 3}, los antiguos SLAs han sido deprecados en favor de \textbf{Deadline Alerts}, que permiten definir compromisos temporales declarativos relativos al disparo real, al fin de una tarea o a una hora fija de negocio, invocando directamente un \code{Notifier} cuando se supera el umbral.
+\end{modernbox}
+
+\begin{lstlisting}[style=python, caption={Configuración defensiva de \code{default\_args}, \textit{backoff} exponencial, \textit{timeouts} y \textit{Notifiers}.}, label={lst:resiliencia-errores}]
+from datetime import timedelta
+import pendulum
+from airflow.decorators import dag, task
+from airflow.providers.slack.notifications.slack_webhook import SlackWebhookNotifier
+
+alerta_slack_fallo = SlackWebhookNotifier(
+    slack_webhook_conn_id="slack_alertas_datos",
+    text=(
+        "[ALERTA] Fallo definitivo en DAG *{{ dag.dag_id }}* | "
+        "Tarea: `{{ ti.task_id }}` | Fecha logica: `{{ ds }}` | "
+        "Log: {{ ti.log_url }}"
+    ),
+)
+
+default_args = {
+    "owner": "equipo-ingenieria-datos",
+    "retries": 3,
+    "retry_delay": timedelta(minutes=2),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=20),
+    "execution_timeout": timedelta(minutes=45),
+    "on_failure_callback": alerta_slack_fallo,
+}
+
+
+@dag(
+    dag_id="ingesta_api_resiliente",
+    default_args=default_args,
+    schedule="@hourly",
+    start_date=pendulum.datetime(2026, 4, 1, tz="UTC"),
+    dagrun_timeout=timedelta(hours=2),
+    max_active_runs=2,
+    catchup=False,
+)
+def ingesta_resiliente():
+    @task(retries=5)  # Sobrescribe retries solo para la llamada mas inestable
+    def consultar_api_externa() -> dict:
+        return {"status": "ok", "records": 340}
+
+    consultar_api_externa()
+
+
+ingesta_resiliente()
+\end{lstlisting}
+
+\subsection{Testing automatizado de DAGs con \texorpdfstring{\pkg{pytest}}{pytest}}
+
+Tratar los DAGs como código de producción implica impedir que un error de importación, un ciclo involuntario o una regresión lógica lleguen jamás al clúster. Una batería de pruebas automatizadas en integración continua (CI) con \pkg{pytest} debe estructurarse en tres niveles complementarios:
+
+\begin{enumerate}
+  \item \textbf{Tests de integridad del \code{DagBag}:} cargan toda la carpeta \code{dags/} sin ejecutar tareas, verificando cero errores de importación (\code{dag\_bag.import\_errors == \{\}}), ausencia de ciclos, cumplimiento de estándares de gobierno (\code{owner}, \code{tags}, \code{retries >= 1}) y un presupuesto máximo de tiempo de parseo por fichero.
+  \item \textbf{Tests estructurales del grafo:} validan que los DAGs críticos conservan los identificadores de tarea esperados y las dependencias esenciales (\code{upstream\_task\_ids} / \code{downstream\_task\_ids}).
+  \item \textbf{Tests unitarios de lógica y ejecución local con \code{dag.test()}:} aíslan las llamadas a sistemas externos mediante \code{unittest.mock.patch} sobre los \textit{Hooks} y ejecutan el DAG completo en memoria, de forma síncrona y sin necesidad de arrancar el \textit{Scheduler}, utilizando \code{dag.test()}.
+\end{enumerate}
+
+\begin{lstlisting}[style=python, caption={Suite de pruebas automatizadas con \pkg{pytest}: validación del \code{DagBag}, reglas de gobierno, mocking de Hooks y \code{dag.test()}.}, label={lst:pytest-dags}]
+from unittest.mock import MagicMock, patch
+import pendulum
+import pytest
+from airflow.models import DagBag
+
+MAX_PARSE_SECONDS = 2.0
+
+
+@pytest.fixture(scope="session")
+def dag_bag() -> DagBag:
+    return DagBag(dag_folder="dags/", include_examples=False)
+
+
+def test_cero_errores_de_importacion(dag_bag: DagBag):
+    assert not dag_bag.import_errors, (
+        f"Errores de parseo en DAGs: {dag_bag.import_errors}"
+    )
+
+
+def test_tiempo_parseo_bajo_presupuesto(dag_bag: DagBag):
+    for stat in dag_bag.dagbag_stats:
+        duracion = stat.duration.total_seconds()
+        assert duracion < MAX_PARSE_SECONDS, (
+            f"El fichero {stat.file} tardo {duracion:.2f}s en parsearse "
+            f"(limite: {MAX_PARSE_SECONDS}s). Revisa el top-level code."
+        )
+
+
+def test_estandares_gobierno_en_todos_los_dags(dag_bag: DagBag):
+    for dag_id, dag in dag_bag.dags.items():
+        assert dag.tags, f"El DAG {dag_id} debe declarar al menos un tag"
+        assert dag.default_args.get("owner") not in (None, "airflow"), (
+            f"El DAG {dag_id} debe asignar un owner real distinto de 'airflow'"
+        )
+        assert dag.default_args.get("retries", 0) >= 1, (
+            f"El DAG {dag_id} debe configurar retries >= 1"
+        )
+
+
+def test_topologia_branching(dag_bag: DagBag):
+    dag = dag_bag.get_dag("segmentacion_clientes_branching")
+    assert dag is not None
+    branch = dag.get_task("elegir_rama")
+    assert branch.downstream_task_ids == {"rama_alta", "rama_baja"}
+
+
+def test_ejecucion_local_con_dag_test_y_mocking(dag_bag: DagBag):
+    dag = dag_bag.get_dag("dag-name-taskflow")
+    assert dag is not None
+
+    # Ejecucion sincrona en memoria sin Scheduler (en Airflow 3: logical_date=...)
+    dag_run = dag.test(execution_date=pendulum.datetime(2026, 4, 20, tz="UTC"))
+    assert dag_run.state == "success"
+
+
+@patch("airflow.providers.postgres.hooks.postgres.PostgresHook")
+def test_extraccion_con_hook_mockeado(mock_pg_cls: MagicMock):
+    mock_hook = mock_pg_cls.return_value
+    mock_hook.get_records.return_value = [(101, 59.90), (102, 120.00)]
+
+    # Invocacion directa de la logica aislada sin depender de una BD real
+    filas = mock_pg_cls(postgres_conn_id="warehouse_pg").get_records("SELECT 1")
+    assert len(filas) == 2
+    assert sum(f[1] for f in filas) == pytest.approx(179.90)
+\end{lstlisting}
+
+\begin{examplebox}[Checklist de revisión de código (\textit{Pull Request}) antes de pasar un DAG a producción]
+Antes de aprobar la fusión de un nuevo DAG en la rama principal, un revisor senior verifica sistemáticamente siete criterios:
+\begin{enumerate}
+  \item \textbf{Parseo limpio:} cero consultas externas, cero \code{Variable.get()} en \textit{top-level code} e importaciones pesadas diferidas dentro de las tareas.
+  \item \textbf{Fechas deterministas:} \code{start\_date} estática con zona horaria (nunca \code{days\_ago}) y filtros ligados a \code{\{\{ ds \}\}} o \code{\{\{ data\_interval\_start \}\}}.
+  \item \textbf{Idempotencia verificada:} relanzar cualquier tarea dos veces deja exactamente el mismo estado en destino.
+  \item \textbf{Cómputo delegado:} XCom transporta únicamente metadatos y URIs ($\ll$ 48\,KB), nunca datasets completos.
+  \item \textbf{Flujo robusto:} nodos tras \textit{branching} protegidos con \code{NONE\_FAILED\_MIN\_ONE\_SUCCESS} y recursos efímeros cerrados con \textit{Setup/Teardown}.
+  \item \textbf{Resiliencia y límites:} \code{retries} con \textit{backoff}, \code{execution\_timeout}, \code{max\_active\_runs} y alertas configuradas.
+  \item \textbf{Pruebas verdes:} la suite \pkg{pytest} de integridad del \code{DagBag} y lógica unitaria supera CI sin advertencias.
+\end{enumerate}
+\end{examplebox}
+
+Con el diseño interno de los DAGs plenamente dominado, el siguiente paso natural consiste en abrir Airflow hacia el mundo exterior: comprender cómo se articula su arquitectura de conectividad, credenciales seguras, secretos corporativos, \textit{Hooks} reutilizables y mecanismos de espera asíncrona a gran escala, objeto del Capítulo~\ref{chap:airflow-conectividad}.

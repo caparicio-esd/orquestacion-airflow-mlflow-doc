@@ -1,0 +1,1841 @@
+% ============================================================================
+% 05_airflow_conectores_catalogo.tex — Capítulo 5: Catálogo Práctico de Conectores
+% ============================================================================
+
+\chapter{Catálogo Práctico de Conectores en Apache Airflow por Dominio}\label{chap:airflow-conectores}
+\chaptermark{Catálogo de Conectores en Airflow}
+
+En el capítulo anterior se desgranó la arquitectura interna de conectividad de Apache Airflow: el ecosistema desacoplado de \textit{Providers}, la gestión declarativa de \textit{Connections}, la externalización segura de secretos mediante \textit{Secrets Backends}, el papel de los \textit{Hooks} como adaptadores de protocolo y la eficiencia de los \textit{Deferrable Operators} sobre el \textit{Triggerer}. Sin embargo, conocer la teoría de la conectividad solo adquiere pleno valor cuando el ingeniero de datos o MLOps se enfrenta a la pregunta cotidiana en producción: \textit{«¿cuál es la forma correcta, segura, escalable y mantenible de conectar Airflow con este sistema concreto?»}.
+
+Este capítulo está concebido como una \textbf{guía de referencia práctica por dominios}. Cada sección aborda una familia tecnológica esencial en arquitecturas modernas de datos e inteligencia artificial ---desde bases de datos relacionales y \textit{Data Warehouses} en la nube hasta almacenamiento de objetos multi-cloud, APIs REST/GraphQL, motores distribuidos como Apache Spark y dbt, ejecución aislada en contenedores Kubernetes, flujos Kafka, alertas, linaje automático con OpenLineage y desarrollo de conectores corporativos propios---. A lo largo de todo el catálogo subyace un principio arquitectónico innegociable:
+
+\begin{infobox}[Regla de oro de la conectividad en Airflow]
+\textbf{Apache Airflow es un plano de control, nunca un plano de datos.} Salvo en extracciones ligeras o metadatos de control, los \textit{workers} de Airflow no deben mover gigabytes en memoria ni ejecutar cómputo pesado en local. Los mejores conectores delegan el movimiento masivo de bytes a comandos nativos del destino (\code{COPY INTO}, \textit{Load Jobs}, \textit{Transfer Services}), el cómputo pesado a clústeres dedicados (Spark, dbt sobre DW, Pods GPU en Kubernetes) y las esperas prolongadas al \textit{Triggerer} asíncrono (\code{deferrable=True}).
+\end{infobox}
+
+Para facilitar la consulta rápida en proyectos reales, la Tabla~\ref{tab:catalogo-maestro-conectores} sintetiza los nueve dominios de integración analizados en este capítulo, indicando el paquete de \textit{provider} oficial (o comunitario de referencia), el identificador \code{conn\_type} esperado por la conexión y los \textit{Hooks}, \textit{Operators}, \textit{Transfers} y sensores \textit{deferrables} recomendados en despliegues modernos de Airflow 2.10 y Airflow 3.0+.
+
+\begin{table}[htbp]
+\centering
+\caption{Catálogo maestro de conectores en Apache Airflow por dominio tecnológico.}
+\label{tab:catalogo-maestro-conectores}
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\renewcommand{\arraystretch}{1.22}
+\begin{tabularx}{\textwidth}{@{}L{2.25cm} L{3.15cm} L{2.05cm} L{4.25cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Dominio} &
+\textcolor{white}{\sffamily\bfseries Paquete Provider} &
+\textcolor{white}{\sffamily\bfseries \texttt{conn\_type}} &
+\textcolor{white}{\sffamily\bfseries Hooks y Operadores clave} &
+\textcolor{white}{\sffamily\bfseries Transfers / Sensores Deferrables} \\
+\midrule
+BBDD Relacionales (SQL) &
+\pkg{common-sql}, \pkg{postgres}, \pkg{mysql}, \pkg{microsoft-mssql} &
+\code{postgres}, \code{mysql}, \code{mssql} &
+\code{DbApiHook}, \code{PostgresHook}; \code{SQLExecuteQueryOperator}, \code{SQLColumnCheckOperator}, \code{SQLTableCheckOperator} &
+\code{SqlToS3Operator}; \code{SqlSensor} (modo \code{reschedule}) \\
+\rowcolor{TableStripe}
+Data Warehouses Cloud &
+\pkg{google}, \pkg{snowflake}, \pkg{amazon} &
+\code{google\_cloud\_\-platform}, \code{snowflake}, \code{redshift} &
+\code{BigQueryHook}, \code{SnowflakeHook}; \code{BigQueryInsertJobOperator}, \code{SQLExecuteQueryOperator}, \code{SnowflakeSqlApiOperator} &
+\code{GCSToBigQueryOperator}, \code{S3ToRedshiftOperator}; \code{BigQueryTableExistence\-Sensor} (\code{deferrable=True}) \\
+Almacenamiento de Objetos &
+\pkg{common-io}, \pkg{amazon}, \pkg{google}, \pkg{microsoft-azure} &
+\code{aws}, \code{google\_cloud\_\-platform}, \code{wasb}, \code{fs} &
+\code{ObjectStoragePath} (API unificada), \code{S3Hook}, \code{GCSHook}, \code{WasbHook} &
+\code{S3ToGCSOperator}, \code{S3CopyObjectOperator}; \code{S3KeySensor}, \code{GCSObjectExistenceSensor} (\code{deferrable=True}) \\
+\rowcolor{TableStripe}
+APIs REST, GraphQL y Webhooks &
+\pkg{http} &
+\code{http} &
+\code{HttpHook}, \code{HttpAsyncHook}; \code{HttpOperator} &
+Integración directa vía \code{HttpHook} + \code{ObjectStoragePath}; \code{HttpSensor} (\code{deferrable=True}) \\
+Cómputo Distribuido (Spark) &
+\pkg{apache-spark}, \pkg{cncf-kubernetes}, \pkg{amazon}, \pkg{databricks} &
+\code{spark}, \code{kubernetes}, \code{aws}, \code{databricks} &
+\code{SparkSubmitOperator}, \code{SparkKubernetesOperator}, \code{EmrServerlessStartJobOperator}, \code{DatabricksSubmitRunOperator} &
+Deferrables nativos en \code{EmrServerless}, \code{Databricks} y \code{SparkKubernetesOperator} \\
+\rowcolor{TableStripe}
+Transformación Analítica (dbt) &
+\pkg{astronomer-cosmos}, \pkg{dbt-cloud} &
+Conexión DW o \code{dbt\_cloud} &
+\code{DbtTaskGroup} (Cosmos), \code{DbtCloudHook}, \code{DbtCloudRunJobOperator} &
+Ejecución granular por modelo; \code{DbtCloudJobRunSensor} (\code{deferrable=True}) \\
+Contenedores y GPUs &
+\pkg{docker}, \pkg{cncf-kubernetes} &
+\code{docker}, \code{kubernetes} &
+\code{DockerHook}, \code{KubernetesHook}; \code{DockerOperator}, \code{KubernetesPodOperator} &
+XCom vía sidecar (\code{/airflow/xcom/return.json}); \code{KubernetesPodOperator} (\code{deferrable=True}) \\
+\rowcolor{TableStripe}
+Streaming y Mensajería &
+\pkg{apache-kafka} &
+\code{kafka} &
+\code{KafkaProducerHook}, \code{KafkaConsumerHook}; \code{ProduceToTopicOperator}, \code{ConsumeFromTopicOperator} &
+\code{AwaitMessageTrigger\-FunctionSensor} (100\% deferrable en Triggerer) \\
+Alertas y Linaje &
+\pkg{slack}, \pkg{smtp}, \pkg{pagerduty}, \pkg{openlineage} &
+\code{slackwebhook}, \code{smtp}, \code{pagerduty} &
+\code{SlackWebhookNotifier}, \code{SmtpNotifier}, \code{BaseNotifier}, \code{OpenLineageProviderPlugin} &
+Eventos automáticos \code{START}/\code{COMPLETE}/\code{FAIL} hacia Marquez o DataHub \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\noindent\textbf{Nota de compatibilidad Airflow 2.10 / Airflow 3.0:} En los ejemplos de código de este capítulo los proveedores siguen residiendo en el espacio de nombres \code{airflow.providers.*}, mientras que los decoradores y abstracciones núcleo (\code{@dag}, \code{@task}, \code{ObjectStoragePath}, \code{BaseOperator}, \code{BaseHook}) migraron en Airflow 3.0 al paquete \code{airflow.sdk} \badge[TealAccent]{Airflow 3}. Salvo donde se indique expresamente la sintaxis del Task SDK, los fragmentos son ejecutables en Airflow 2.10+ y portables de forma inmediata a Airflow 3.0 ajustando únicamente las importaciones del núcleo.
+
+% ============================================================================
+\section{Bases de Datos Relacionales y Data Warehouses}\label{sec:conectores-sql}
+% ============================================================================
+
+Las bases de datos relacionales (PostgreSQL, MySQL, MariaDB, SQL Server, Oracle) y los \textit{Data Warehouses} analíticos en la nube (Google BigQuery, Snowflake, Amazon Redshift) constituyen el núcleo de la inmensa mayoría de pipelines de datos. Durante los primeros años de Airflow proliferaron decenas de operadores casi idénticos (\code{PostgresOperator}, \code{MySqlOperator}, \code{SnowflakeOperator}, \code{MsSqlOperator}), cada uno duplicando la lógica de ejecución SQL, plantillas y retorno de resultados. Esa fragmentación quedó resuelta con la consolidación del proveedor \pkg{apache-airflow-providers-common-sql}.
+
+\subsection{El proveedor unificado \texttt{common.sql} y \texttt{SQLExecuteQueryOperator}}
+
+El proveedor \pkg{common.sql} define una interfaz común apoyada en \code{DbApiHook} (estándar PEP 249 / DB-API 2.0) y en un único operador polimórfico: \code{SQLExecuteQueryOperator}. En tiempo de ejecución, este operador inspecciona el \code{conn\_type} de la conexión indicada en \code{conn\_id}, resuelve dinámicamente el \textit{Hook} concreto del motor (por ejemplo, \code{PostgresHook}, \code{MySqlHook}, \code{SnowflakeHook} o \code{TrinoHook}) y ejecuta la sentencia aplicando un comportamiento homogéneo en manejo de transacciones, parámetros y extracción de linaje OpenLineage.
+
+\begin{modernbox}[{Modernización: Jubilación de operadores SQL específicos \badge[TealAccent]{Airflow 2.7+ / 3.0} \badge[AmberAccent]{Deprecado}}]
+En despliegues actuales y en Airflow 3.0, los operadores específicos por motor ---\code{PostgresOperator}, \code{MySqlOperator}, \code{SnowflakeOperator}, \code{MsSqlOperator}, \code{OracleOperator}, \code{RedshiftSQLOperator} y \code{SqliteOperator}--- están \textbf{deprecados o eliminados} en las versiones mayores de sus respectivos \textit{providers}.
+\begin{itemize}
+  \item \textbf{Patrón heredado (evitar):} importar \code{PostgresOperator} y acoplar el DAG al proveedor concreto, pasando \code{postgres\_conn\_id}.
+  \item \textbf{Patrón moderno (obligatorio):} usar \code{SQLExecuteQueryOperator} con \code{conn\_id}. Si un pipeline evoluciona de PostgreSQL local a Snowflake o Redshift en producción, basta con cambiar el \code{conn\_id} y adaptar el dialecto SQL externo sin tocar la clase del operador.
+\end{itemize}
+\end{modernbox}
+
+\subsection{Separación de SQL en archivos externos, seguridad y control de salida}
+
+Incrustar consultas SQL de decenas o cientos de líneas dentro de cadenas literales en Python es una mala práctica recurrente: impide el coloreado de sintaxis, dificulta el análisis estático con herramientas como \pkg{sqlfluff}, ensucia las revisiones de código y favorece errores de escape. En producción deben aplicarse cuatro disciplinas combinadas:
+
+\begin{enumerate}
+  \item \textbf{Archivos SQL externos con \code{template\_searchpath}:} almacenar las consultas en un directorio dedicado (habitualmente \code{include/sql/*.sql}) y declararlo en el parámetro \code{template\_searchpath} del DAG. Airflow resuelve rutas relativas y renderiza automáticamente las expresiones Jinja dentro del archivo \code{.sql} antes de enviarlo al motor.
+  \item \textbf{Jinja frente a \code{parameters} (prevención de SQL Injection):} la regla de seguridad es tajante. Las variables Jinja (\code{\{\{ ds \}\}}, \code{\{\{ params.esquema \}\}}) realizan interpolación textual antes de enviar la consulta; solo deben utilizarse para identificadores estructurales (tablas, esquemas) o macros confiables del contexto de Airflow. Todo valor procedente de entradas externas (\code{dag\_run.conf}, formularios, APIs o usuarios) debe inyectarse mediante el argumento \code{parameters}, que delega en los \textit{bind parameters} del driver DB-API (\code{\%(clave)s} en \pkg{psycopg2}/\pkg{snowflake-connector}, \code{:clave} en Oracle), haciendo imposible la inyección SQL.
+  \item \textbf{Control transaccional con \code{split\_statements=True}:} cuando un archivo SQL contiene varias sentencias encadenadas (por ejemplo, el patrón idempotente \code{DELETE} de la partición seguido de \code{INSERT} o \code{MERGE}), activar \code{split\_statements=True} garantiza que el \textit{Hook} divida y ejecute cada sentencia respetando la atomicidad configurada en \code{autocommit=False}.
+  \item \textbf{Extracción controlada de resultados con \code{handler}:} por defecto, si \code{do\_xcom\_push=True}, \code{SQLExecuteQueryOperator} intenta serializar todas las filas devueltas por el cursor hacia XCom, lo que puede colapsar la base de datos de metadatos. Si se necesita devolver un escalar (por ejemplo, un conteo o una marca de agua), debe suministrarse una función \code{handler} explícita junto con \code{return\_last=True}; en sentencias DDL/DML que no retornan filas, conviene establecer \code{do\_xcom\_push=False}.
+\end{enumerate}
+
+Los Listados~\ref{lst:sql-ventas-externo} y~\ref{lst:sql-execute-query-dag} ilustran este diseño limpio e idempotente en PostgreSQL.
+
+\begin{lstlisting}[style=sql, caption={Archivo externo \texttt{include/sql/cargar\_ventas\_diarias.sql} con carga idempotente por partición y parámetro seguro.}, label={lst:sql-ventas-externo}]
+-- Idempotencia por fecha lógica (ds) y parámetro enlazado %(pais)s
+-- Ejecutado dentro de una única transacción (autocommit=False)
+DELETE FROM dwh_silver.ventas_diarias
+WHERE fecha_venta = CAST('{{ ds }}' AS DATE)
+  AND codigo_pais = %(pais)s;
+
+INSERT INTO dwh_silver.ventas_diarias (
+    venta_id,
+    fecha_venta,
+    codigo_pais,
+    cliente_id,
+    importe_bruto,
+    importe_neto,
+    actualizado_en
+)
+SELECT
+    s.venta_id,
+    CAST(s.timestamp_evento AS DATE) AS fecha_venta,
+    s.codigo_pais,
+    s.cliente_id,
+    s.importe_bruto,
+    s.importe_bruto - COALESCE(s.descuento, 0) AS importe_neto,
+    CURRENT_TIMESTAMP AS actualizado_en
+FROM dwh_bronze.ventas_raw AS s
+WHERE CAST(s.timestamp_evento AS DATE) = CAST('{{ ds }}' AS DATE)
+  AND s.codigo_pais = %(pais)s;
+
+-- Última sentencia: devuelve un único escalar consumido por el handler
+SELECT COUNT(*) AS filas_cargadas
+FROM dwh_silver.ventas_diarias
+WHERE fecha_venta = CAST('{{ ds }}' AS DATE)
+  AND codigo_pais = %(pais)s;
+\end{lstlisting}
+
+\begin{lstlisting}[style=python, caption={Uso de \texttt{SQLExecuteQueryOperator} con SQL externo, \texttt{parameters}, \texttt{split\_statements} y \texttt{handler}.}, label={lst:sql-execute-query-dag}]
+from datetime import datetime
+from airflow.decorators import dag, task
+from airflow.providers.common.sql.operators.sql import (
+    SQLExecuteQueryOperator,
+    SQLColumnCheckOperator,
+    SQLTableCheckOperator,
+)
+
+def extraer_escalar(cursor) -> int:
+    """Devuelve únicamente el primer valor de la última consulta."""
+    fila = cursor.fetchone()
+    return int(fila[0]) if fila else 0
+
+@dag(
+    dag_id="etl_ventas_sql_calidad",
+    start_date=datetime(2025, 1, 1),
+    schedule="0 4 * * *",
+    catchup=False,
+    template_searchpath=["/opt/airflow/include/sql"],
+    tags=["sql", "silver", "calidad"],
+)
+def pipeline_ventas_sql():
+    cargar_particion = SQLExecuteQueryOperator(
+        task_id="cargar_ventas_diarias",
+        conn_id="postgres_dwh_prod",
+        sql="cargar_ventas_diarias.sql",
+        # Parámetro seguro enlazado por el driver (inmune a SQL Injection)
+        parameters={"pais": "{{ dag_run.conf.get('pais', 'ES') }}"},
+        split_statements=True,
+        autocommit=False,
+        return_last=True,
+        handler=extraer_escalar,
+        # Parámetros específicos del Hook subyacente (timeout de sesión)
+        hook_params={"options": "-c statement_timeout=300000"},
+    )
+
+    # Puerta de calidad a nivel de columnas (Data Quality Gate)
+    validar_columnas = SQLColumnCheckOperator(
+        task_id="validar_columnas_ventas",
+        conn_id="postgres_dwh_prod",
+        table="dwh_silver.ventas_diarias",
+        partition_clause="fecha_venta = '{{ ds }}'",
+        column_mapping={
+            "venta_id": {
+                "null_check": {"equal_to": 0},
+                "unique_check": {"equal_to": 0},  # 0 duplicados tolerados
+            },
+            "importe_neto": {
+                "null_check": {"equal_to": 0},
+                "min": {"geq_to": 0.0},
+                "max": {"leq_to": 250000.0},
+            },
+            "codigo_pais": {
+                "distinct_check": {"geq_to": 1},
+            },
+        },
+        accept_none=False,
+    )
+
+    # Puerta de calidad a nivel de tabla (reglas de negocio y volumetría)
+    validar_tabla = SQLTableCheckOperator(
+        task_id="validar_invariantes_tabla",
+        conn_id="postgres_dwh_prod",
+        table="dwh_silver.ventas_diarias",
+        partition_clause="fecha_venta = '{{ ds }}'",
+        checks={
+            "volumen_minimo_diario": {
+                "check_statement": "COUNT(*) >= 100",
+            },
+            "coherencia_neto_vs_bruto": {
+                "check_statement": "SUM(importe_neto) <= SUM(importe_bruto)",
+            },
+        },
+    )
+
+    @task
+    def registrar_resumen(total_filas: int) -> None:
+        print(f"Partición validada con éxito: {total_filas} registros.")
+
+    cargar_particion >> [validar_columnas, validar_tabla] >> registrar_resumen(
+        cargar_particion.output
+    )
+
+pipeline_ventas_sql()
+\end{lstlisting}
+
+\subsection{Operadores de calidad de datos SQL integrados}
+
+Los operadores \code{SQLColumnCheckOperator} y \code{SQLTableCheckOperator} incluidos en \pkg{common.sql} (mostrados en el Listado~\ref{lst:sql-execute-query-dag}) implementan el patrón \textit{Write-Audit-Publish} (o compuertas de calidad) sin escribir tareas Python personalizadas ni extraer datos fuera de la base de datos. Cada validación se compila en una consulta SQL agregada ejecutada directamente dentro del motor, filtrada mediante \code{partition\_clause} para evitar escaneos completos de tablas históricas. Además, \code{SQLColumnCheckOperator} admite el parámetro \code{tolerance} (por ejemplo, \code{"tolerance": 0.05} para tolerar una desviación del $\pm 5\%$ respecto a un valor esperado), y emite facetas estructuradas de calidad de datos (\code{DataQualityAssertionsDatasetFacet}) hacia OpenLineage cuando la observabilidad está habilitada.
+
+\subsection{Patrones específicos en Data Warehouses Cloud: BigQuery y Snowflake}
+
+Aunque \code{SQLExecuteQueryOperator} funciona en múltiples motores, los \textit{Data Warehouses} gestionados en la nube incorporan capacidades avanzadas de carga masiva, control de costes y ejecución asíncrona que requieren aprovechar sus operadores especializados:
+
+\begin{itemize}
+  \item \textbf{Google BigQuery:} el operador de referencia es \code{BigQueryInsertJobOperator} (sustituto del heredado \code{BigQueryOperator}), que envía una especificación completa de trabajo a la API de BigQuery. Permite configurar particionado por fecha mediante decoradores (\code{tabla\$\{\{ ds\_nodash \}\}}), modo idempotente \code{WRITE\_TRUNCATE}, límites estrictos de facturación (\code{maximumBytesBilled}) y ejecución \code{deferrable=True} para no retener \textit{workers} durante consultas de varios minutos. Para ingesta desde Cloud Storage se emplea \code{GCSToBigQueryOperator}, que dispara un \textit{Load Job} nativo (cero bytes pasan por Airflow). Para aserciones específicas de dialecto GoogleSQL también existen \code{BigQueryCheckOperator} y \code{BigQueryValueCheckOperator}, además de los operadores genéricos de \pkg{common.sql}.
+  \item \textbf{Snowflake:} el patrón de oro combina \code{SQLExecuteQueryOperator} (o \code{SnowflakeSqlApiOperator} para consultas largas en modo \code{deferrable=True} a través de la SQL API REST de Snowflake) con sentencias \code{COPY INTO} desde un \textit{External Stage} en Amazon S3 o GCS. Un matiz crítico de producción es sobreescribir el almacén de cómputo (\code{warehouse}) y el rol por tarea mediante \code{hook\_params}, asignando almacenes \code{XSMALL} a chequeos de calidad y almacenes \code{LARGE} únicamente a agregaciones pesadas.
+\end{itemize}
+
+\begin{lstlisting}[style=python, caption={Patrones de producción en BigQuery (carga nativa + límite de coste) y Snowflake (\texttt{COPY INTO} con \texttt{hook\_params}).}, label={lst:dw-bigquery-snowflake}]
+from airflow.providers.google.cloud.transfers.gcs_to_bigquery import (
+    GCSToBigQueryOperator,
+)
+from airflow.providers.google.cloud.operators.bigquery import (
+    BigQueryInsertJobOperator,
+)
+from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+
+# --- Patrón 1: Google BigQuery (Load Job nativo + Transformación deferrable) ---
+cargar_gcs_a_bq = GCSToBigQueryOperator(
+    task_id="cargar_parquet_a_bq_bronze",
+    gcp_conn_id="gcp_analytics_prod",
+    bucket="datalake-prod-eu",
+    source_objects=["bronze/eventos/dt={{ ds }}/*.parquet"],
+    destination_project_dataset_table=(
+        "mi-proyecto.bronze.eventos${{ ds_nodash }}"
+    ),
+    source_format="PARQUET",
+    write_disposition="WRITE_TRUNCATE",   # Reemplazo idempotente de partición
+    create_disposition="CREATE_IF_NEEDED",
+    time_partitioning={"type": "DAY", "field": "fecha_evento"},
+    deferrable=True,
+)
+
+agregar_en_bq = BigQueryInsertJobOperator(
+    task_id="materializar_gold_bq",
+    gcp_conn_id="gcp_analytics_prod",
+    location="EU",
+    configuration={
+        "query": {
+            "query": "{% include 'gold_metricas_bq.sql' %}",
+            "useLegacySql": False,
+            "destinationTable": {
+                "projectId": "mi-proyecto",
+                "datasetId": "gold",
+                "tableId": "metricas_diarias${{ ds_nodash }}",
+            },
+            "writeDisposition": "WRITE_TRUNCATE",
+            # Salvaguarda FinOps: aborta si el escaneo supera 10 GiB
+            "maximumBytesBilled": str(10 * 1024**3),
+        }
+    },
+    deferrable=True,
+)
+
+# --- Patrón 2: Snowflake (COPY INTO desde Stage S3 con sizing por tarea) ---
+copy_into_snowflake = SQLExecuteQueryOperator(
+    task_id="copy_into_snowflake_staging",
+    conn_id="snowflake_prod",
+    hook_params={
+        "warehouse": "WH_INGESTA_MEDIUM",
+        "role": "ROLE_AIRFLOW_LOADER",
+        "database": "ANALYTICS_DB",
+        "schema": "BRONZE",
+    },
+    sql="""
+        COPY INTO ANALYTICS_DB.BRONZE.PEDIDOS_RAW
+        FROM @ANALYTICS_DB.BRONZE.STAGE_S3_PEDIDOS/dt={{ ds }}/
+        FILE_FORMAT = (TYPE = PARQUET)
+        MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
+        ON_ERROR = 'ABORT_STATEMENT'
+        FORCE = FALSE;
+    """,
+    do_xcom_push=False,
+)
+\end{lstlisting}
+
+\begin{warningbox}[FinOps y anti-patrones en Data Warehouses]
+Nunca utilice \code{PostgresHook.get\_pandas\_df("SELECT * FROM tabla\_gigante")} ni extraiga tablas analíticas completas hacia un \textit{worker} para agregarlas en Pandas: además de provocar errores \textit{Out-of-Memory} (OOM), duplica costes de red (\textit{egress}). En BigQuery configure siempre \code{maximumBytesBilled} y filtros por columna de partición; en Snowflake asegure que los almacenes dispongan de \code{AUTO\_SUSPEND = 60} y evite \code{FORCE = TRUE} en \code{COPY INTO} salvo que realice primero un \code{DELETE} explícito de la partición, pues de lo contrario duplicará ficheros en reintentos.
+\end{warningbox}
+
+% ============================================================================
+\section{Almacenamiento de Objetos y la API Unificada \texorpdfstring{\texttt{ObjectStoragePath}}{ObjectStoragePath}}\label{sec:conectores-object-storage}
+% ============================================================================
+
+El almacenamiento de objetos ---Amazon S3, Google Cloud Storage (GCS), Azure Blob / Data Lake Storage Gen2 (ADLS) y despliegues compatibles con S3 como MinIO o Ceph--- actúa como columna vertebral de la arquitectura Medallion y de los repositorios de artefactos ML. Tradicionalmente, interactuar con estos servicios obligaba a acoplar el código de los DAGs al SDK y al \textit{Hook} de cada proveedor (\code{S3Hook} con \pkg{boto3}, \code{GCSHook} con \pkg{google-cloud-storage}, \code{WasbHook} con \pkg{azure-storage-blob}), penalizando la portabilidad y complicando las pruebas locales.
+
+\subsection{Abstracción multi-cloud con \texttt{ObjectStoragePath}}
+
+Introducida a partir de Airflow 2.8 junto con \pkg{apache-airflow-providers-common-io} y promovida al núcleo del Task SDK en Airflow 3.0, la clase \code{ObjectStoragePath} ofrece una API idéntica a \code{pathlib.Path} sobre \pkg{fsspec}, capaz de operar de forma transparente sobre sistemas de ficheros locales y nubes públicas o privadas mediante una URI estándar que integra el identificador de conexión de Airflow:
+
+\[
+\texttt{<esquema>://<conn\_id>@<bucket\_o\_contenedor>/<prefijo>/<objeto>}
+\]
+
+De este modo, las rutas \code{s3://aws\_prod@lake-bronze/ventas/}, \code{gs://gcp\_prod@lake-gold/ventas/}, \code{abfs://azure\_prod@curated/ventas/} y \code{file:///tmp/dev-lake/ventas/} comparten exactamente los mismos métodos (\code{exists()}, \code{iterdir()}, \code{glob()}, \code{stat()}, \code{open()}, \code{read\_bytes()}, \code{copy()}, \code{unlink()}, operador \code{/} para concatenar rutas).
+
+\begin{modernbox}[{Portabilidad sin \textit{vendor lock-in} con \texttt{ObjectStoragePath} \badge[TealAccent]{Airflow 2.8+ / 3.0}}]
+En Airflow 2.8--2.10 la clase se importa desde \code{airflow.io.path}; en Airflow 3.0 forma parte de \code{airflow.sdk} (\code{from airflow.sdk import ObjectStoragePath}). Su mayor ventaja operativa es que el entorno de desarrollo puede apuntar a MinIO o disco local (\code{s3://minio\_local@raw/...} o \code{file:///data/raw/...}) y el entorno de producción a AWS S3 o GCS cambiando exclusivamente una variable de configuración, sin reescribir una sola línea de código ni importar \pkg{boto3}. Además, \code{ObjectStoragePath} hereda de \code{Dataset}/\code{Asset}, lo que habilita planificación guiada por datos (\textit{Asset-Aware Scheduling}) de forma directa.
+\end{modernbox}
+
+El Listado~\ref{lst:object-storage-path} muestra una tarea completa que descubre ficheros particionados, filtra y transforma en formato Parquet con \pkg{pyarrow} y replica la salida entre dos nubes (por ejemplo, desde MinIO o AWS S3 hacia Google Cloud Storage) con código completamente agnóstico del proveedor.
+
+\begin{lstlisting}[style=python, caption={Lectura, escritura particionada y copia multi-cloud (S3/MinIO -> GCS) mediante \texttt{ObjectStoragePath}.}, label={lst:object-storage-path}]
+import pyarrow as pa
+import pyarrow.parquet as pq
+from airflow.decorators import task
+
+# En Airflow 3.0: from airflow.sdk import ObjectStoragePath
+from airflow.io.path import ObjectStoragePath
+
+@task
+def compactar_y_replicar_particion(
+    fecha_logica: str,
+    origen_base: str = "s3://minio_or_aws@datalake-bronze/clics",
+    destino_silver: str = "s3://minio_or_aws@datalake-silver/clics",
+    replica_gcs: str = "gs://gcp_analytics_prod@datalake-backup/clics",
+) -> dict[str, str | int]:
+    """Compacta micro-ficheros Parquet de una partición y replica a GCS."""
+    dir_origen = ObjectStoragePath(origen_base) / f"dt={fecha_logica}"
+    fichero_silver = (
+        ObjectStoragePath(destino_silver) / f"dt={fecha_logica}" / "part-000.parquet"
+    )
+    fichero_replica = (
+        ObjectStoragePath(replica_gcs) / f"dt={fecha_logica}" / "part-000.parquet"
+    )
+
+    if not dir_origen.exists():
+        raise FileNotFoundError(f"Partición inexistente: {dir_origen}")
+
+    tablas = []
+    for ruta in sorted(dir_origen.glob("*.parquet")):
+        # Streaming por archivo sin descargar el directorio completo a disco
+        with ruta.open("rb") as f_in:
+            tablas.append(pq.read_table(f_in))
+
+    if not tablas:
+        return {"uri_silver": str(fichero_silver), "filas": 0}
+
+    tabla_compactada = pa.concat_tables(tablas, promote_options="default")
+    # Escritura directa en almacenamiento destino (crea prefijos virtuales)
+    with fichero_silver.open("wb") as f_out:
+        pq.write_table(tabla_compactada, f_out, compression="zstd")
+
+    # Copia multi-cloud transparente (S3/MinIO -> GCS) por bloques en streaming
+    fichero_silver.copy(fichero_replica)
+
+    return {
+        "uri_silver": str(fichero_silver),
+        "uri_replica": str(fichero_replica),
+        "filas": tabla_compactada.num_rows,
+        "tamano_bytes": fichero_silver.stat().st_size,
+    }
+\end{lstlisting}
+
+\subsection{Operadores de transferencia (\textit{Transfer Operators}) y plano de datos}
+
+Cuando se trata de mover decenas o cientos de gigabytes entre sistemas, la pregunta arquitectónica determinante es: \textit{¿viajan los datos a través de la memoria y red del worker de Airflow o se transfieren directamente entre origen y destino?} La Tabla~\ref{tab:transfer-operators-plano} clasifica los \textit{Transfer Operators} más frecuentes según su comportamiento sobre el plano de datos.
+
+\begin{table}[htbp]
+\centering
+\caption{Comportamiento sobre el plano de datos de los principales \textit{Transfer Operators}.}
+\label{tab:transfer-operators-plano}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{4.2cm} C{2.3cm} L{3.1cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Operador} &
+\textcolor{white}{\sffamily\bfseries Pasa por Worker} &
+\textcolor{white}{\sffamily\bfseries Mecanismo subyacente} &
+\textcolor{white}{\sffamily\bfseries Recomendación de uso en producción} \\
+\midrule
+\code{S3ToRedshiftOperator} & \nomark\ No & Comando \code{COPY} nativo en Redshift & Ideal a cualquier escala (GB--TB). Cero carga de red en Airflow. \\
+\rowcolor{TableStripe}
+\code{GCSToBigQueryOperator} & \nomark\ No & BigQuery Load Job asíncrono & Ideal a cualquier escala; activar siempre \code{deferrable=True}. \\
+\code{S3CopyObjectOperator} & \nomark\ No & API server-side copy de AWS S3 & Copias intra-nube instantáneas (hasta 5~GB por parte o multipart). \\
+\rowcolor{TableStripe}
+\code{SqlToS3Operator} & \yesmark\ Sí (chunks) & Cursor DB-API $\rightarrow$ fichero temporal $\rightarrow$ S3 & Adecuado para tablas OLTP pequeñas/medianas ($< 5$~GB). Para TB usar Spark o CDC/DMS. \\
+\code{S3ToGCSOperator} & \yesmark\ Sí (stream) & Descarga S3 y subida a GCS desde worker & Solo volúmenes moderados. Para TB usar Google Storage Transfer Service (\code{CloudDataTransferService\-CreateJobOperator}). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+El Listado~\ref{lst:transfers-y-sensores-storage} combina dos operadores de transferencia (\code{SqlToS3Operator} y \code{S3ToRedshiftOperator}) junto con sensores de ficheros en modo \textit{deferrable} para AWS S3 y Google Cloud Storage.
+
+\begin{lstlisting}[style=python, caption={Transferencias estructuradas (\texttt{SqlToS3}, \texttt{S3ToRedshift}) y sensores de objetos \textit{deferrables}.}, label={lst:transfers-y-sensores-storage}]
+from datetime import timedelta
+from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
+from airflow.providers.amazon.aws.transfers.sql_to_s3 import SqlToS3Operator
+from airflow.providers.amazon.aws.transfers.s3_to_redshift import (
+    S3ToRedshiftOperator,
+)
+from airflow.providers.google.cloud.sensors.gcs import (
+    GCSObjectExistenceSensor,
+)
+
+# 1. Sensor deferrable en S3: espera sin ocupar worker slots
+esperar_fichero_s3 = S3KeySensor(
+    task_id="esperar_entrega_proveedor_s3",
+    aws_conn_id="aws_datalake_prod",
+    bucket_name="landing-externos-prod",
+    bucket_key="pedidos/{{ ds }}/_SUCCESS",
+    wildcard_match=False,
+    deferrable=True,              # Delegado al Triggerer asyncio
+    poke_interval=60,             # Intervalo de sondeo en Triggerer (segundos)
+    timeout=int(timedelta(hours=4).total_seconds()),
+    soft_fail=False,
+)
+
+# 2. Sensor deferrable equivalente en Google Cloud Storage
+esperar_fichero_gcs = GCSObjectExistenceSensor(
+    task_id="esperar_entrega_gcs",
+    google_cloud_conn_id="gcp_analytics_prod",
+    bucket="landing-externos-gcp",
+    object="pedidos/{{ ds }}/_SUCCESS",
+    deferrable=True,
+    poke_interval=60,
+    timeout=14400,
+)
+
+# 3. Extracción controlada desde PostgreSQL OLTP hacia Parquet en S3
+extraer_oltp_a_s3 = SqlToS3Operator(
+    task_id="extraer_catalogo_a_s3",
+    sql_conn_id="postgres_oltp_replica",
+    aws_conn_id="aws_datalake_prod",
+    query="""
+        SELECT producto_id, sku, categoria, precio_eur, actualizado_en
+        FROM public.productos
+        WHERE actualizado_en >= '{{ data_interval_start }}'
+          AND actualizado_en <  '{{ data_interval_end }}'
+    """,
+    s3_bucket="datalake-bronze-prod",
+    s3_key="catalogo/dt={{ ds }}/productos.parquet",
+    file_format="parquet",
+    replace=True,
+)
+
+# 4. Carga masiva sin pasar datos por Airflow (Redshift COPY nativo)
+cargar_s3_a_redshift = S3ToRedshiftOperator(
+    task_id="cargar_catalogo_redshift",
+    aws_conn_id="aws_datalake_prod",
+    redshift_conn_id="redshift_dwh_prod",
+    s3_bucket="datalake-bronze-prod",
+    s3_key="catalogo/dt={{ ds }}/productos.parquet",
+    schema="bronze",
+    table="productos_delta",
+    method="UPSERT",
+    upsert_keys=["producto_id"],
+    copy_options=["FORMAT AS PARQUET"],
+)
+\end{lstlisting}
+
+% ============================================================================
+\section{APIs REST, GraphQL y Webhooks}\label{sec:conectores-http}
+% ============================================================================
+
+Integrar fuentes SaaS (Stripe, Salesforce, HubSpot, GitHub, APIs de precios o servicios internos de microservicios) mediante HTTP es uno de los casos más frecuentes y, a la vez, más propensos a fallos silenciosos en producción si no se contemplan autenticación renovable, paginación exhaustiva, límites de tasa (\textit{rate limits}) y validación estricta de respuestas.
+
+\subsection{Evolución del proveedor \texttt{apache-airflow-providers-http}}
+
+El proveedor HTTP ofrece tres bloques de construcción principales:
+\begin{itemize}
+  \item \textbf{\code{HttpOperator}:} reemplaza al deprecado \code{SimpleHttpOperator}. Es idóneo para invocaciones atómicas (disparar un \textit{webhook}, consultar un estado o ejecutar una petición \code{POST}/\code{PUT} sencilla) combinando \code{response\_check} para validar condiciones semánticas y \code{response\_filter} para extraer únicamente un identificador pequeño hacia XCom.
+  \item \textbf{\code{HttpSensor}:} comprueba periódicamente un \textit{endpoint} hasta que \code{response\_check} devuelve \code{True}; soporta \code{deferrable=True} mediante \code{HttpAsyncHook} sobre \pkg{aiohttp}.
+  \item \textbf{\code{HttpHook}:} abstrae la resolución de credenciales desde una conexión de tipo \code{http} (\code{host}, \code{schema}, \code{port}, \code{login}, \code{password} y JSON \code{extra} para cabeceras por defecto, TLS \code{verify} o \textit{proxies}) y expone sesiones \pkg{requests} reutilizables dentro de tareas TaskFlow (\code{@task}). Es la herramienta adecuada cuando existe paginación, refresco OAuth2 o escritura en \textit{streaming} a Object Storage.
+\end{itemize}
+
+\subsection{Autenticación, paginación, \textit{rate limiting} y escritura a Parquet}
+
+Un error clásico al consumir APIs externas desde Airflow consiste en acumular todas las páginas JSON en una lista de Python y devolverla como valor de retorno del \code{@task} (inundando XCom), ignorar respuestas HTTP \code{429 Too Many Requests} o asumir que un token OAuth2 nunca caduca durante una extracción de veinte minutos. El Listado~\ref{lst:http-paginacion-oauth2} presenta un patrón completo de grado productivo que resuelve todos estos requisitos de forma elegante.
+
+\begin{lstlisting}[style=python, caption={Extracción paginada (cursor-based) con OAuth2 renovable, control de \texttt{Retry-After} y escritura directa a Parquet.}, label={lst:http-paginacion-oauth2}]
+import random
+import time
+from typing import Any
+import pyarrow as pa
+import pyarrow.parquet as pq
+from airflow.decorators import task
+from airflow.io.path import ObjectStoragePath
+from airflow.providers.http.hooks.http import HttpHook
+
+class ClienteOAuth2Paginado:
+    """Gestiona tokens OAuth2 client_credentials y reintentos ante 429/5xx."""
+
+    def __init__(self, conn_id: str, token_endpoint: str) -> None:
+        self.hook = HttpHook(method="GET", http_conn_id=conn_id)
+        self.token_endpoint = token_endpoint
+        self._access_token: str | None = None
+        self._expira_en: float = 0.0
+
+    def _obtener_token(self) -> str:
+        ahora = time.monotonic()
+        if self._access_token and ahora < self._expira_en - 30:
+            return self._access_token
+
+        conn = self.hook.get_connection(self.hook.http_conn_id)
+        token_hook = HttpHook(method="POST", http_conn_id=self.hook.http_conn_id)
+        resp = token_hook.run(
+            endpoint=self.token_endpoint,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": conn.login,
+                "client_secret": conn.password,
+                "scope": conn.extra_dejson.get("scope", "read:orders"),
+            },
+            extra_options={"timeout": 15, "check_response": True},
+        )
+        cuerpo = resp.json()
+        self._access_token = cuerpo["access_token"]
+        self._expira_en = ahora + int(cuerpo.get("expires_in", 3600))
+        return self._access_token
+
+    def get_con_backoff(
+        self, endpoint: str, params: dict[str, Any], max_intentos: int = 5
+    ) -> dict[str, Any]:
+        for intento in range(max_intentos):
+            token = self._obtener_token()
+            resp = self.hook.run(
+                endpoint=endpoint,
+                data=params,
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                extra_options={"timeout": 30, "check_response": False},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code == 401 and intento < max_intentos - 1:
+                # Token revocado o expirado prematuramente: forzar renovación
+                self._access_token = None
+                continue
+            if resp.status_code in (429, 502, 503, 504) and intento < max_intentos - 1:
+                retry_after = resp.headers.get("Retry-After")
+                espera = (
+                    float(retry_after)
+                    if retry_after and retry_after.isdigit()
+                    else min(60.0, (2 ** intento) + random.uniform(0.2, 1.0))
+                )
+                time.sleep(espera)
+                continue
+            resp.raise_for_status()
+        raise RuntimeError(f"Agotados reintentos al consultar {endpoint}")
+
+@task
+def extraer_api_pedidos_a_parquet(fecha_logica: str) -> dict[str, str | int]:
+    cliente = ClienteOAuth2Paginado(
+        conn_id="api_saas_pedidos",
+        token_endpoint="/oauth/token",
+    )
+    destino = ObjectStoragePath(
+        f"s3://aws_prod@datalake-bronze/api_pedidos/dt={fecha_logica}/datos.parquet"
+    )
+
+    esquema = pa.schema([
+        ("pedido_id", pa.string()),
+        ("cliente_id", pa.string()),
+        ("importe", pa.float64()),
+        ("estado", pa.string()),
+        ("creado_en", pa.string()),
+    ])
+
+    cursor: str | None = None
+    total_registros = 0
+
+    # ParquetWriter escribe por lotes (Row Groups): uso de RAM acotado O(tamaño_página)
+    with destino.open("wb") as f_out:
+        with pq.ParquetWriter(f_out, esquema, compression="snappy") as writer:
+            while True:
+                params = {"date": fecha_logica, "limit": 500}
+                if cursor:
+                    params["cursor"] = cursor
+
+                payload = cliente.get_con_backoff("/v2/orders", params=params)
+                items = payload.get("data", [])
+                if items:
+                    lote = pa.Table.from_pylist(
+                        [
+                            {
+                                "pedido_id": str(r["id"]),
+                                "cliente_id": str(r["customer_id"]),
+                                "importe": float(r["amount"]),
+                                "estado": str(r["status"]),
+                                "creado_en": str(r["created_at"]),
+                            }
+                            for r in items
+                        ],
+                        schema=esquema,
+                    )
+                    writer.write_table(lote)
+                    total_registros += len(items)
+
+                cursor = payload.get("pagination", {}).get("next_cursor")
+                if not cursor:
+                    break
+
+    # XCom ligero: únicamente metadatos y URI del objeto persistido
+    return {"uri": str(destino), "registros": total_registros}
+\end{lstlisting}
+
+\subsection{Validación con \texttt{HttpOperator}, GraphQL y Webhooks entrantes}
+
+Para llamadas puntuales, \code{HttpOperator} y \code{HttpSensor} eliminan código repetitivo. Al interactuar con APIs \textbf{GraphQL} conviene recordar una trampa habitual: GraphQL suele responder con código HTTP \code{200 OK} incluso cuando la consulta fracasa lógicamente, devolviendo una clave \code{"errors"} en el cuerpo JSON. Por ello, el uso de \code{response\_check} es imprescindible:
+
+\begin{lstlisting}[style=python, caption={Consumo seguro de GraphQL con \texttt{HttpOperator} y espera asíncrona con \texttt{HttpSensor}.}, label={lst:http-graphql-sensor}]
+import json
+from airflow.providers.http.operators.http import HttpOperator
+from airflow.providers.http.sensors.http import HttpSensor
+
+def validar_graphql_sin_errores(response) -> bool:
+    if response.status_code != 200:
+        return False
+    cuerpo = response.json()
+    return "errors" not in cuerpo and cuerpo.get("data") is not None
+
+lanzar_snapshot_graphql = HttpOperator(
+    task_id="solicitar_snapshot_graphql",
+    http_conn_id="api_graphql_crm",
+    endpoint="/graphql",
+    method="POST",
+    headers={"Content-Type": "application/json"},
+    data=json.dumps({
+        "query": "mutation($dt: String!) { createExport(date: $dt) { jobId } }",
+        "variables": {"dt": "{{ ds }}"},
+    }),
+    response_check=validar_graphql_sin_errores,
+    response_filter=lambda resp: resp.json()["data"]["createExport"]["jobId"],
+    log_response=False,  # Evitar volcar PII o tokens a los logs
+)
+
+esperar_snapshot_listo = HttpSensor(
+    task_id="esperar_snapshot_graphql",
+    http_conn_id="api_graphql_crm",
+    endpoint="/v1/exports/{{ ti.xcom_pull(task_ids='solicitar_snapshot_graphql') }}",
+    response_check=lambda resp: resp.json().get("state") == "COMPLETED",
+    deferrable=True,
+    poke_interval=30,
+    timeout=3600,
+)
+\end{lstlisting}
+
+En sentido inverso (\textit{Webhooks} entrantes desde sistemas externos hacia Airflow), en lugar de sondear continuamente un \textit{endpoint}, el sistema externo puede disparar directamente un DAG o publicar un evento de activo mediante la API REST de Airflow (en Airflow 3.0 bajo \code{POST /api/v2/dags/\{dag\_id\}/dagRuns} o \code{POST /api/v2/assets/events} autenticada con JWT/OAuth2), reduciendo latencia y consumo de recursos.
+
+% ============================================================================
+\section{Motores de Procesamiento Distribuido y Transformación: Apache Spark y dbt}\label{sec:conectores-spark-dbt}
+% ============================================================================
+
+Cuando la transformación supera la capacidad de una consulta SQL simple o exige procesamiento distribuido de terabytes de ficheros semiestructurados, dos ecosistemas dominan la ingeniería de datos moderna: \textbf{Apache Spark} para procesamiento distribuido general y \textbf{dbt} (\textit{data build tool}) para ingeniería analítica modular en SQL dentro del \textit{Data Warehouse} o \textit{Lakehouse}.
+
+\subsection{Orquestación de Apache Spark sin sobrecargar Airflow}
+
+Ejecutar sesiones PySpark en modo \code{local[*]} dentro de un \textit{worker} de Airflow constituye uno de los anti-patrones más destructivos en producción: la JVM consume rápidamente la memoria del contenedor, provoca reinicios por \code{SIGKILL} (OOM) y degrada al resto de tareas concurrentes. Airflow debe actuar estrictamente como cliente lanzador y supervisor del trabajo remoto. La Tabla~\ref{tab:comparativa-spark-operators} compara las cuatro estrategias principales de integración con Spark.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa de operadores de Airflow para orquestar trabajos Apache Spark.}
+\label{tab:comparativa-spark-operators}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{3.5cm} L{2.6cm} C{1.9cm} C{1.8cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Operador} &
+\textcolor{white}{\sffamily\bfseries Infraestructura} &
+\textcolor{white}{\sffamily\bfseries Binario Spark en worker} &
+\textcolor{white}{\sffamily\bfseries Deferrable} &
+\textcolor{white}{\sffamily\bfseries Caso de uso ideal} \\
+\midrule
+\code{SparkSubmitOperator} & YARN, Standalone, K8s clásico & \yesmark\ Sí (JVM + CLI) & \nomark\ No & Entornos \textit{on-premise} heredados con Hadoop/YARN. \\
+\rowcolor{TableStripe}
+\code{SparkKubernetesOperator} & Spark Operator (CRD) en K8s & \nomark\ No & \yesmark\ Sí & Arquitecturas \textit{cloud-native} sobre Kubernetes con aislamiento total de versiones Spark. \\
+\code{EmrServerlessStartJob\-Operator} / \code{EmrAddSteps} & AWS EMR Serverless / EMR EC2 & \nomark\ No & \yesmark\ Sí & Entornos AWS sin mantenimiento de clústeres permanentes y pago por segundo. \\
+\rowcolor{TableStripe}
+\code{DatabricksSubmitRun\-Operator} / \code{RunNow} & Databricks Lakehouse & \nomark\ No & \yesmark\ Sí & Equipos en Databricks (\code{SubmitRun} para definición GitOps en Airflow; \code{RunNow} para disparar \textit{jobs} ya registrados). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+El Listado~\ref{lst:spark-operadores} muestra ejemplos listos para producción en los tres enfoques modernos sin dependencia de JVM en el \textit{worker}: Kubernetes CRD, AWS EMR Serverless y Databricks.
+
+\begin{lstlisting}[style=python, caption={Orquestación de Spark en Kubernetes (\texttt{SparkKubernetesOperator}), AWS EMR Serverless y Databricks.}, label={lst:spark-operadores}]
+from airflow.providers.cncf.kubernetes.operators.spark_kubernetes import (
+    SparkKubernetesOperator,
+)
+from airflow.providers.amazon.aws.operators.emr import (
+    EmrServerlessStartJobOperator,
+)
+from airflow.providers.databricks.operators.databricks import (
+    DatabricksSubmitRunOperator,
+)
+
+# 1. Spark nativo en Kubernetes (CRD SparkApplication, cero JVM en worker)
+spark_en_k8s = SparkKubernetesOperator(
+    task_id="procesar_clics_spark_k8s",
+    kubernetes_conn_id="k8s_analytics_cluster",
+    namespace="spark-jobs",
+    application_file="spark/clics_silver_app.yaml",  # Plantilla Jinja aceptada
+    delete_on_termination=True,
+    deferrable=True,
+)
+
+# 2. AWS EMR Serverless (sin gestionar clústeres, pago por uso, deferrable)
+spark_emr_serverless = EmrServerlessStartJobOperator(
+    task_id="procesar_sesiones_emr_serverless",
+    aws_conn_id="aws_datalake_prod",
+    application_id="{{ var.value.emr_serverless_app_id }}",
+    execution_role_arn="arn:aws:iam::123456789012:role/EMRServerlessETLRole",
+    name="sesiones-silver-{{ ds_nodash }}",
+    job_driver={
+        "sparkSubmit": {
+            "entryPoint": "s3://artifacts-prod/spark/jobs/sesiones_silver.py",
+            "entryPointArguments": ["--fecha", "{{ ds }}"],
+            "sparkSubmitParameters": (
+                "--conf spark.executor.cores=4 "
+                "--conf spark.executor.memory=16g "
+                "--conf spark.dynamicAllocation.enabled=true"
+            ),
+        }
+    },
+    configuration_overrides={
+        "monitoringConfiguration": {
+            "s3MonitoringConfiguration": {"logUri": "s3://logs-prod/emr/"}
+        }
+    },
+    deferrable=True,
+)
+
+# 3. Databricks Lakehouse (job efímero definido como código, deferrable)
+spark_databricks = DatabricksSubmitRunOperator(
+    task_id="agregacion_gold_databricks",
+    databricks_conn_id="databricks_prod",
+    deferrable=True,
+    json={
+        "run_name": "gold_metricas_{{ ds }}",
+        "tasks": [
+            {
+                "task_key": "transformar_gold",
+                "new_cluster": {
+                    "spark_version": "15.4.x-scala2.12",
+                    "node_type_id": "m6i.xlarge",
+                    "autoscale": {"min_workers": 2, "max_workers": 8},
+                },
+                "spark_python_task": {
+                    "python_file": "dbfs:/jobs/gold_metricas.py",
+                    "parameters": ["--ds", "{{ ds }}"],
+                },
+            }
+        ],
+    },
+)
+\end{lstlisting}
+
+\subsection{Orquestación granular de dbt: Astronomer Cosmos frente al anti-patrón monolítico}
+
+\textbf{dbt} (\textit{data build tool}) permite estructurar la capa de transformación SQL con control de versiones, documentación, macros Jinja y pruebas automatizadas. Sin embargo, la forma en que se integra con Airflow determina por completo la operabilidad del equipo de datos.
+
+\begin{warningbox}[Anti-patrón: \texttt{BashOperator(bash\_command="dbt run \&\& dbt test")}]
+Invocar todo un proyecto dbt desde un único \code{BashOperator} transforma docenas o cientos de modelos en una \textbf{caja negra monolítica}:
+\begin{enumerate}
+  \item \textbf{Pérdida de reintentos selectivos:} si falla el modelo 78 por un corte transitorio del \textit{Data Warehouse}, reintentar la tarea reejecuta inútilmente los modelos 1 a 77, disparando costes de cómputo y retrasando los SLAs.
+  \item \textbf{Ceguera operativa y de linaje:} la vista de grafo de Airflow muestra una única caja sin tiempos por modelo, sin alertas diferenciadas por criticidad y sin posibilidad de encadenar tareas ML posteriores únicamente al modelo del que dependen.
+  \item \textbf{Infierno de dependencias:} instalar \pkg{dbt-core} y sus adaptadores junto a Airflow genera frecuentes colisiones de versiones (\pkg{pydantic}, \pkg{protobuf}, \pkg{jinja2}).
+\end{enumerate}
+\end{warningbox}
+
+Existen dos soluciones productivas sólidas para superar este anti-patrón:
+\begin{itemize}
+  \item \textbf{Astronomer Cosmos (\pkg{astronomer-cosmos}):} librería abierta que lee el proyecto dbt (o el artefacto precompilado \code{manifest.json} generado en CI/CD para minimizar el tiempo de \textit{parsing} del Scheduler) y proyecta automáticamente cada modelo, semilla, \textit{snapshot} y test de dbt como una \textbf{tarea individual de Airflow} dentro de un \code{DbtTaskGroup}, respetando exactamente el grafo de dependencias \code{ref()} y \code{source()}. Además, traduce las \textit{Connections} de Airflow en perfiles dbt al vuelo (\code{ProfileConfig}), evitando almacenar contraseñas en \code{profiles.yml}, y soporta modos de ejecución aislados (\code{ExecutionMode.VIRTUALENV}, \code{ExecutionMode.KUBERNETES}, \code{ExecutionMode.DOCKER} o \code{ExecutionMode.LOCAL}).
+  \item \textbf{dbt Cloud (\code{DbtCloudRunJobOperator}):} para organizaciones con licencia gestionada de dbt Cloud; dispara trabajos remotos con \code{deferrable=True}, descarga los artefactos \code{run\_results.json} y monitoriza el estado con \code{DbtCloudJobRunSensor}.
+\end{itemize}
+
+El Listado~\ref{lst:dbt-cosmos} ejemplifica un pipeline completo donde una ingesta previa alimenta un \code{DbtTaskGroup} de Cosmos en entorno virtual aislado y encadena posteriormente un reentrenamiento de modelo ML.
+
+\begin{lstlisting}[style=python, caption={Integración granular de dbt mediante \texttt{DbtTaskGroup} de Astronomer Cosmos con perfil mapeado desde Airflow Connection.}, label={lst:dbt-cosmos}]
+from datetime import datetime
+from pathlib import Path
+from airflow.decorators import dag, task
+from cosmos import (
+    DbtTaskGroup,
+    ExecutionConfig,
+    ExecutionMode,
+    LoadMode,
+    ProfileConfig,
+    ProjectConfig,
+    RenderConfig,
+    TestBehavior,
+)
+from cosmos.profiles import SnowflakeUserPasswordProfileMapping
+
+DBT_PROJECT_DIR = Path("/opt/airflow/dags/dbt/analytics_corp")
+
+profile_snowflake = ProfileConfig(
+    profile_name="analytics_corp",
+    target_name="prod",
+    profile_mapping=SnowflakeUserPasswordProfileMapping(
+        conn_id="snowflake_prod",
+        profile_args={
+            "database": "ANALYTICS_DB",
+            "schema": "GOLD",
+            "warehouse": "WH_DBT_TRANSFORM",
+        },
+    ),
+)
+
+@dag(
+    dag_id="medallion_ingesta_y_dbt_cosmos",
+    start_date=datetime(2025, 1, 1),
+    schedule="0 5 * * *",
+    catchup=False,
+    tags=["dbt", "cosmos", "gold"],
+)
+def pipeline_dbt_cosmos():
+    @task
+    def verificar_ingesta_bronze(ds: str) -> str:
+        return f"bronze_listo_{ds}"
+
+    # Cada modelo y test dbt se convierte en una tarea independiente en Airflow
+    transformaciones_dbt = DbtTaskGroup(
+        group_id="modelos_financieros_dbt",
+        project_config=ProjectConfig(
+            dbt_project_path=DBT_PROJECT_DIR,
+            # Usar manifest.json precompilado en CI evita ejecutar dbt ls en el Scheduler
+            manifest_path=DBT_PROJECT_DIR / "target" / "manifest.json",
+        ),
+        profile_config=profile_snowflake,
+        execution_config=ExecutionConfig(
+            execution_mode=ExecutionMode.VIRTUALENV,
+            # O alternativamente ExecutionMode.KUBERNETES para aislamiento total
+        ),
+        render_config=RenderConfig(
+            load_method=LoadMode.DBT_MANIFEST,
+            select=["tag:diario"],
+            # Ejecuta los tests de cada modelo inmediatamente tras construirlo
+            test_behavior=TestBehavior.AFTER_EACH,
+        ),
+        operator_args={
+            "py_requirements": ["dbt-snowflake==1.8.4"],
+            "install_deps": False,
+            "vars": {"fecha_proceso": "{{ ds }}"},
+        },
+    )
+
+    @task
+    def notificar_tablas_gold_listas(ds: str) -> None:
+        print(f"Capa Gold construida y testada para {ds}; lista para ML.")
+
+    verificar_ingesta_bronze() >> transformaciones_dbt >> notificar_tablas_gold_listas()
+
+pipeline_dbt_cosmos()
+\end{lstlisting}
+
+% ============================================================================
+\section{Contenedores y Cómputo Aislado: \texorpdfstring{\texttt{DockerOperator} y \texttt{KubernetesPodOperator}}{DockerOperator y KubernetesPodOperator}}\label{sec:conectores-contenedores}
+% ============================================================================
+
+En organizaciones maduras con múltiples equipos de datos, ciencia de datos e ingeniería de IA, intentar empaquetar las librerías de todos los pipelines dentro de la misma imagen base de los \textit{workers} de Airflow conduce inevitablemente al colapso: un equipo requiere PyTorch~2.5 con CUDA~12.4 y NumPy~2, otro mantiene un modelo legado en TensorFlow~2.15 con NumPy~1.26, y un tercer equipo necesita ejecutar un binario compilado en Rust o un motor estadístico en R. La solución definitiva es el patrón \textbf{«Airflow como orquestador puro de contenedores»}.
+
+\subsection{Arquitectura desacoplada: Plano de Control frente a Plano de Cómputo}
+
+La Figura~\ref{fig:aislamiento-computo-airflow} contrasta el anti-patrón de ejecución acoplada sobre el \textit{worker} frente a la arquitectura desacoplada en la que Airflow mantiene \textit{workers} livianos (0,5--1 vCPU) y delega cada carga de trabajo en el plano de cómputo óptimo: Pods efímeros con CPU/GPU en Kubernetes mediante \code{KubernetesPodOperator}, ejecutores distribuidos Spark y cómputo MPP en el \textit{Data Warehouse}.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.8cm and 1.1cm]
+  % ==================== ZONA IZQUIERDA: ANTI-PATRON ====================
+  \node[amberbox, text width=4.3cm, minimum height=0.9cm] (anti_title) at (0, 3.6)
+    {\textbf{Anti-patrón: Acoplamiento en Worker}};
+
+  \node[subbox, draw=AmberAccent, fill=WarnBg!55, text width=4.1cm, minimum height=4.4cm, below=0.35cm of anti_title] (anti_worker) {};
+  \node[font=\sffamily\footnotesize\bfseries, text=AmberAccent] at ([yshift=-0.32cm]anti_worker.north) {Airflow Worker Sobredimensionado};
+
+  \node[subbox, text width=3.5cm, fill=white, draw=CrimsonAccent!70] (anti_1) at ([yshift=-1.1cm]anti_worker.north)
+    {PyTorch + TensorFlow + dbt + Spark JVM};
+  \node[subbox, text width=3.5cm, fill=white, draw=CrimsonAccent!70] (anti_2) at ([yshift=-2.05cm]anti_worker.north)
+    {Conflictos \texttt{numpy}/\texttt{pydantic}/\texttt{CUDA}};
+  \node[subbox, text width=3.5cm, fill=white, draw=CrimsonAccent!70] (anti_3) at ([yshift=-3.0cm]anti_worker.north)
+    {OOM Kill (SIGKILL) afecta a otras tareas};
+  \node[subbox, text width=3.5cm, fill=white, draw=CrimsonAccent!70] (anti_4) at ([yshift=-3.9cm]anti_worker.north)
+    {Coste GPU ociosa 24/7 en Workers};
+
+  % Separador vertical
+  \draw[dashed, line width=1pt, color=LightBorder] (2.85, 4.2) -- (2.85, -1.6);
+
+  % ==================== ZONA DERECHA: ARQUITECTURA DESACOPLADA ====================
+  \node[tealbox, text width=11.0cm, minimum height=0.9cm] (good_title) at (9.1, 3.6)
+    {\textbf{Arquitectura Desacoplada: Plano de Control vs. Plano de Cómputo Aislado}};
+
+  % Plano de control Airflow
+  \node[darkbox, text width=3.1cm, minimum height=1.35cm] (ctrl) at (5.1, 0.9)
+    {Airflow Control Plane\\[-1pt]\scriptsize Scheduler + Triggerer\\[-1pt]\scriptsize Light Workers (0.5 vCPU)};
+
+  % Tres nodos de cómputo aislado a la derecha (espaciado vertical amplio)
+  \node[archbox, text width=4.4cm, minimum height=1.25cm] (k8s_gpu) at (12.0, 2.55)
+    {Pod Efímero K8s (GPU / ML)\\[-1pt]\scriptsize Imagen inmutable @sha256\\[-1pt]\scriptsize \texttt{nvidia.com/gpu: 1} + Secrets K8s};
+
+  \node[tealbox, text width=4.4cm, minimum height=1.25cm] (spark_cls) at (12.0, 0.75)
+    {Clúster Spark (K8s / EMR / DBX)\\[-1pt]\scriptsize Ejecutores elásticos distribuidos\\[-1pt]\scriptsize Procesamiento TB en Parquet/Iceberg};
+
+  \node[archbox, text width=4.4cm, minimum height=1.25cm] (dw_mpp) at (12.0, -1.05)
+    {Data Warehouse MPP (dbt / SQL)\\[-1pt]\scriptsize BigQuery / Snowflake / Redshift\\[-1pt]\scriptsize Transformación SQL y Quality Gates};
+
+  % Caja agrupadora del plano de cómputo
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(k8s_gpu)(spark_cls)(dw_mpp), inner sep=9pt, label={[font=\sffamily\scriptsize\bfseries, text=MutedGray]below:Plano de Cómputo Elástico y Heterogéneo (pago solo durante la ejecución)}] (compute_grp) {};
+  \end{scope}
+
+  % Flechas de control desde Airflow
+  \draw[flowarrow] (ctrl.east) -- ++(0.75, 0) |- (k8s_gpu.west)
+    node[elabel, pos=0.76, above=2pt] {\texttt{KubernetesPodOperator}};
+  \draw[tealarrow] (ctrl.east) -- ++(0.75, 0) |- (spark_cls.west)
+    node[elabel, pos=0.76, above=2pt] {\texttt{SparkK8s / EMR}};
+  \draw[flowarrow] (ctrl.east) -- ++(0.75, 0) |- (dw_mpp.west)
+    node[elabel, pos=0.76, above=2pt] {\texttt{DbtTaskGroup / SQL}};
+
+  % Retorno ligero de metadatos y eventos por debajo sin solapar
+  \draw[dashedarrow] (compute_grp.south west) ++(0.4, 0) -- ++(0, -0.55) -| (ctrl.south)
+    node[elabel, pos=0.25, below=3pt] {XCom ligero (\texttt{/airflow/xcom/return.json}) + Triggerer async};
+\end{tikzpicture}%
+}
+\caption{Aislamiento de dependencias y cómputo heterogéneo frente al anti-patrón de sobrecarga en \textit{workers} de Airflow.}
+\label{fig:aislamiento-computo-airflow}
+\end{figure}
+
+\subsection{\texttt{DockerOperator} frente a \texttt{KubernetesPodOperator}}
+
+\begin{itemize}
+  \item \textbf{\code{DockerOperator} (\pkg{apache-airflow-providers-docker}):} resulta práctico en desarrollo local, entornos de una sola máquina virtual o despliegues en el borde (\textit{edge}) sin Kubernetes. En producción exige precaución de seguridad: montar \code{/var/run/docker.sock} dentro del contenedor del \textit{worker} equivale a otorgar privilegios de \code{root} sobre el anfitrión; debe mitigarse mediante un \textit{Docker Socket Proxy} restringido, habilitar \code{auto\_remove="force"} para evitar acumulación de contenedores detenidos y desactivar \code{mount\_tmp\_dir=False} cuando Airflow corre a su vez dentro de Docker.
+  \item \textbf{\code{KubernetesPodOperator} (\pkg{apache-airflow-providers-cncf-kubernetes}):} es el estándar de oro empresarial. Cada tarea crea un Pod en el \textit{namespace} y \textit{node pool} apropiados con cuotas exactas de CPU, memoria y GPU (\code{nvidia.com/gpu}), inyecta credenciales de forma nativa mediante objetos \code{Secret} de Kubernetes, tolera \textit{taints} de nodos especializados y admite \code{deferrable=True} para que el \textit{worker} libere su ranura en cuanto el Pod arranca, delegando la vigilancia del estado al \textit{Triggerer}.
+\end{itemize}
+
+\subsection{Implementación productiva de \texttt{KubernetesPodOperator}}
+
+Un detalle especialmente valioso del \code{KubernetesPodOperator} es el mecanismo \code{do\_xcom\_push=True}: Airflow inyecta automáticamente un contenedor \textit{sidecar} ligero (\code{airflow-xcom-sidecar}) que comparte un volumen vacío (\code{emptyDir}) montado en \code{/airflow/xcom}. Cuando el proceso principal finaliza, basta con que escriba un diccionario JSON pequeño en \code{/airflow/xcom/return.json} (por ejemplo, el URI del modelo entrenado y las métricas de validación); el \textit{sidecar} captura ese archivo y lo publica en XCom antes de cerrar el Pod. El Listado~\ref{lst:k8s-pod-operator} reúne todas las salvaguardas recomendadas en producción.
+
+\begin{lstlisting}[style=python, caption={Configuración de producción de \texttt{KubernetesPodOperator} con GPU, secretos K8s, XCom sidecar y modo \textit{deferrable}.}, label={lst:k8s-pod-operator}]
+from kubernetes.client import models as k8s
+from airflow.providers.cncf.kubernetes.operators.pod import (
+    KubernetesPodOperator,
+)
+from airflow.providers.cncf.kubernetes.secret import Secret
+
+# Secretos inyectados desde Kubernetes Secrets (nunca expuestos en el DAG ni en UI)
+secret_api_mlflow = Secret(
+    deploy_type="env",
+    deploy_target="MLFLOW_TRACKING_TOKEN",
+    secret="mlflow-credentials",
+    key="tracking_token",
+)
+secret_cert_tls = Secret(
+    deploy_type="volume",
+    deploy_target="/etc/ssl/corp",
+    secret="corp-ca-bundle",
+)
+
+entrenar_embeddings_gpu = KubernetesPodOperator(
+    task_id="entrenar_embeddings_pytorch_gpu",
+    kubernetes_conn_id="k8s_ml_cluster",
+    namespace="ml-workloads",
+    name="train-embeddings-{{ ds_nodash }}",
+    # Imagen inmutable fijada por digest SHA-256 (reproducibilidad garantizada)
+    image=(
+        "registry.empresa.io/ml/embeddings-trainer"
+        "@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    ),
+    image_pull_policy="IfNotPresent",
+    image_pull_secrets=[k8s.V1LocalObjectReference(name="regcred-privado")],
+    cmds=["python", "-m", "trainer.run"],
+    arguments=[
+        "--fecha", "{{ ds }}",
+        "--run-id", "{{ run_id }}",
+        "--dataset-uri", "s3://ml-features-prod/corpus/dt={{ ds }}/",
+        "--xcom-output", "/airflow/xcom/return.json",
+    ],
+    env_vars={
+        "MLFLOW_TRACKING_URI": "https://mlflow.interno.empresa.io",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    },
+    secrets=[secret_api_mlflow, secret_cert_tls],
+    # Cuotas estrictas de CPU, RAM y GPU dedicada
+    container_resources=k8s.V1ResourceRequirements(
+        requests={"cpu": "4", "memory": "16Gi", "nvidia.com/gpu": "1"},
+        limits={"cpu": "8", "memory": "32Gi", "nvidia.com/gpu": "1"},
+    ),
+    # Planificación exclusiva en el pool de nodos GPU con taint dedicado
+    node_selector={"workload-pool": "gpu-nvidia-l4"},
+    tolerations=[
+        k8s.V1Toleration(
+            key="nvidia.com/gpu",
+            operator="Exists",
+            effect="NoSchedule",
+        )
+    ],
+    service_account_name="sa-ml-trainer",  # IRSA / Workload Identity para S3/GCS
+    do_xcom_push=True,                     # Lee /airflow/xcom/return.json vía sidecar
+    get_logs=True,
+    startup_timeout_seconds=300,
+    is_delete_operator_pod=True,           # En proveedores recientes: on_finish_action
+    on_finish_action="delete_succeeded_pod",  # Conserva Pod fallido para depuración
+    deferrable=True,                       # Libera worker slot durante el entrenamiento
+)
+\end{lstlisting}
+
+% ============================================================================
+\section{Integración con Sistemas de Streaming y Mensajería: Apache Kafka}\label{sec:conectores-kafka}
+% ============================================================================
+
+En el Capítulo~1 se analizó la convivencia entre procesamiento \textit{streaming} (latencia subsegundo) y procesamiento \textit{batch} (agregaciones históricas, reentrenamientos y conciliaciones) en arquitecturas Lambda y Kappa. Conviene insistir en una frontera clara: \textbf{Airflow nunca sustituye a Apache Flink ni a Kafka Streams} para procesar eventos con SLA de milisegundos. Sin embargo, el proveedor oficial \pkg{apache-airflow-providers-apache-kafka} (respaldado por el cliente C de alto rendimiento \pkg{confluent-kafka}/\pkg{librdkafka}) convierte a Airflow en el puente perfecto entre ambos mundos a través de tres patrones complementarios:
+
+\begin{enumerate}
+  \item \textbf{Orquestación reactiva dirigida por eventos (\code{AwaitMessageTriggerFunctionSensor}):} en lugar de lanzar un DAG a una hora fija rezando para que el sistema transaccional haya cerrado el día, este sensor escucha de forma \textbf{100\% \textit{deferrable}} dentro del \textit{Triggerer} un \textit{topic} de Kafka hasta detectar un mensaje que satisfaga un predicado Python (\code{apply\_function}), disparando al instante el pipeline \textit{batch} aguas abajo sin consumir ningún \textit{worker}.
+  \item \textbf{Micro-ingesta acotada Streaming $\rightarrow$ Batch (\code{ConsumeFromTopicOperator}):} drena de manera controlada un número máximo de mensajes (\code{max\_messages}) por ejecución, procesándolos en lotes (\code{max\_batch\_size}) para depositarlos en formato analítico (Parquet en S3/GCS) y confirmando los \textit{offsets} del grupo de consumidores de manera determinista.
+  \item \textbf{Publicación Batch $\rightarrow$ Streaming (\code{ProduceToTopicOperator}):} una vez que una tabla Gold o una inferencia \textit{batch} de ML concluye y supera los controles de calidad, Airflow publica eventos de negocio o alertas hacia Kafka para que microservicios en tiempo real reaccionen de inmediato.
+\end{enumerate}
+
+\subsection{Configuración segura de la conexión \texttt{kafka\_default}}
+
+A diferencia de las bases de datos SQL, el proveedor de Kafka recibe prácticamente toda la configuración de \pkg{librdkafka} dentro del campo JSON \code{extra} de la conexión (que en producción debe recuperarse desde un \textit{Secrets Backend}):
+
+\begin{lstlisting}[style=json, caption={Campo \texttt{extra} de una conexión Airflow (\texttt{conn\_type="kafka"}) con autenticación SASL\_SSL.}, label={lst:kafka-conn-extra}]
+{
+  "bootstrap.servers": "kafka-1.prod.interno:9093,kafka-2.prod.interno:9093",
+  "security.protocol": "SASL_SSL",
+  "sasl.mechanism": "SCRAM-SHA-512",
+  "sasl.username": "airflow_orchestrator",
+  "sasl.password": "SECRET_RESUELTO_DESDE_VAULT",
+  "group.id": "airflow-microbatch-riesgo-v1",
+  "auto.offset.reset": "earliest",
+  "enable.auto.commit": false
+}
+\end{lstlisting}
+
+\subsection{Pipeline híbrido completo Kafka $\leftrightarrow$ Airflow}
+
+El Listado~\ref{lst:kafka-pipeline-hibrido} ilustra un flujo completo que espera una marca de cierre en Kafka mediante \code{AwaitMessageTriggerFunctionSensor}, drena un micro-lote acotado hacia Parquet en Object Storage con \code{ConsumeFromTopicOperator} y publica un evento de finalización idempotente mediante \code{ProduceToTopicOperator}.
+
+\begin{lstlisting}[style=python, caption={Pipeline híbrido Kafka <-> Airflow con sensor deferrable, consumo acotado a Parquet y publicación de eventos.}, label={lst:kafka-pipeline-hibrido}]
+import json
+from datetime import datetime
+from typing import Iterator
+import pyarrow as pa
+import pyarrow.parquet as pq
+from airflow.decorators import dag
+from airflow.io.path import ObjectStoragePath
+from airflow.providers.apache.kafka.operators.consume import (
+    ConsumeFromTopicOperator,
+)
+from airflow.providers.apache.kafka.operators.produce import (
+    ProduceToTopicOperator,
+)
+from airflow.providers.apache.kafka.sensors.kafka import (
+    AwaitMessageTriggerFunctionSensor,
+)
+
+def detectar_evento_cierre(mensaje, fecha_esperada: str) -> dict | None:
+    """Devuelve payload si el evento marca el cierre contable de la fecha."""
+    cuerpo = json.loads(mensaje.value().decode("utf-8"))
+    if cuerpo.get("tipo") == "CIERRE_DIARIO" and cuerpo.get("fecha") == fecha_esperada:
+        return cuerpo  # Valor truthy dispara el TriggerEvent y despierta el DAG
+    return None
+
+def volcar_lote_a_parquet(mensajes, destino_uri: str) -> None:
+    """Función invocada por cada lote consumido (commit_cadence='end_of_batch')."""
+    filas = [json.loads(m.value().decode("utf-8")) for m in mensajes if m.value()]
+    if not filas:
+        return
+    primer_offset = mensajes[0].offset()
+    particion = mensajes[0].partition()
+    ruta = (
+        ObjectStoragePath(destino_uri)
+        / f"part-{particion}-offset-{primer_offset}.parquet"
+    )
+    tabla = pa.Table.from_pylist(filas)
+    with ruta.open("wb") as f_out:
+        pq.write_table(tabla, f_out, compression="snappy")
+
+def generar_evento_disponibilidad(fecha: str, run_id: str) -> Iterator[tuple[str, str]]:
+    """Produce clave determinista (idempotencia/compactación) y valor JSON."""
+    clave = f"riesgo-credito:{fecha}"
+    payload = {
+        "dataset": "gold.scores_riesgo_credito",
+        "fecha_logica": fecha,
+        "airflow_run_id": run_id,
+        "estado": "LISTO",
+    }
+    yield (clave, json.dumps(payload))
+
+@dag(
+    dag_id="puente_streaming_batch_kafka",
+    start_date=datetime(2025, 1, 1),
+    schedule="@daily",
+    catchup=False,
+    tags=["kafka", "streaming", "hibrido"],
+)
+def pipeline_hibrido_kafka():
+    esperar_cierre = AwaitMessageTriggerFunctionSensor(
+        task_id="esperar_watermark_cierre_kafka",
+        kafka_config_id="kafka_prod_consumer",
+        topics=["eventos.cierre_contable"],
+        apply_function="dags.puente_kafka.detectar_evento_cierre",
+        apply_function_kwargs={"fecha_esperada": "{{ ds }}"},
+        poll_timeout=5,
+        poll_interval=10,
+    )
+
+    consumir_micro_lote = ConsumeFromTopicOperator(
+        task_id="consumir_transacciones_pendientes",
+        kafka_config_id="kafka_prod_consumer",
+        topics=["transacciones.validadas"],
+        apply_function_batch=volcar_lote_a_parquet,
+        apply_function_kwargs={
+            "destino_uri": "s3://aws_prod@datalake-bronze/kafka_tx/dt={{ ds }}"
+        },
+        max_messages=10000,            # Cota estricta: evita bloqueo infinito
+        max_batch_size=1000,
+        poll_timeout=10,
+        commit_cadence="end_of_batch", # Confirma offsets solo tras persistir Parquet
+    )
+
+    publicar_evento_fin = ProduceToTopicOperator(
+        task_id="publicar_dataset_listo_kafka",
+        kafka_config_id="kafka_prod_producer",
+        topic="datos.listos.modelo_riesgo",
+        producer_function=generar_evento_disponibilidad,
+        producer_function_kwargs={"fecha": "{{ ds }}", "run_id": "{{ run_id }}"},
+        synchronous=True,              # Espera ACK del bróker antes de marcar éxito
+    )
+
+    esperar_cierre >> consumir_micro_lote >> publicar_evento_fin
+
+pipeline_hibrido_kafka()
+\end{lstlisting}
+
+\begin{warningbox}[Gestión de \textit{offsets} y bloqueos en \texttt{ConsumeFromTopicOperator}]
+Desactive siempre \code{enable.auto.commit: false} en la conexión de Kafka y delegue la confirmación al operador mediante \code{commit\_cadence="end\_of\_batch"} (o \code{"end\_of\_operator"} si desea atomicidad global de toda la tarea). Además, establezca siempre un valor finito en \code{max\_messages} y \code{poll\_timeout}: si el \textit{topic} tiene tráfico continuo y no se define \code{max\_messages}, la tarea no terminará nunca y bloqueará indefinidamente el DAG.
+\end{warningbox}
+
+% ============================================================================
+\section{Notificaciones, Observabilidad y Linaje de Datos}\label{sec:conectores-observabilidad-linaje}
+% ============================================================================
+
+Conectar Airflow con motores de datos es solo la mitad del trabajo en producción; la otra mitad consiste en responder con rapidez a dos preguntas operativas críticas: \textit{«¿qué ha fallado y a quién hay que avisar sin generar fatiga de alertas?»} y \textit{«si esta tabla se corrompe o cambia de esquema, qué pipelines, cuadros de mando y modelos ML aguas abajo se verán afectados?»}.
+
+\subsection{Arquitectura moderna de alertas con Notifiers (\texttt{BaseNotifier})}
+
+Desde Airflow 2.6 y consolidado en Airflow 3.0, el patrón recomendado para notificaciones reemplaza funciones \textit{callback} dispersas por objetos declarativos que heredan de \code{BaseNotifier}. Estos \textit{Notifiers} soportan plantillas Jinja de forma nativa, se reutilizan indistintamente en \code{on\_failure\_callback}, \code{on\_success\_callback}, \code{on\_retry\_callback} o a nivel de DAG, y disponen de implementaciones oficiales para Slack (\code{SlackWebhookNotifier}), correo (\code{SmtpNotifier}), PagerDuty (\code{PagerdutyNotifier}) y Opsgenie. Cuando se requiere integrar canales corporativos como Microsoft Teams con tarjetas enriquecidas, basta con subclasificar \code{BaseNotifier} en unas pocas líneas, tal como muestra el Listado~\ref{lst:notifiers-produccion}.
+
+\begin{lstlisting}[style=python, caption={Configuración de \texttt{SlackWebhookNotifier} y desarrollo de un \texttt{BaseNotifier} propio para Microsoft Teams.}, label={lst:notifiers-produccion}]
+import json
+from typing import Sequence
+from airflow.notifications.basenotifier import BaseNotifier
+from airflow.providers.http.hooks.http import HttpHook
+from airflow.providers.slack.notifications.slack_webhook import (
+    SlackWebhookNotifier,
+)
+
+# 1. Notifier oficial de Slack con contexto accionable y enlace directo a logs
+alerta_slack_fallo = SlackWebhookNotifier(
+    slack_webhook_conn_id="slack_data_alerts",
+    channel="#alertas-pipelines-prod",
+    username="Airflow-Guard",
+    text=(
+        "*FALLO EN PIPELINE DE PRODUCCION*\n"
+        "- *DAG:* `{{ dag.dag_id }}`\n"
+        "- *Tarea:* `{{ ti.task_id }}` (intento {{ ti.try_number }})\n"
+        "- *Fecha lógica:* `{{ ds }}`\n"
+        "- *Error:* `{{ exception }}`\n"
+        "- *Logs:* <{{ ti.log_url }}|Abrir trazas en Airflow>"
+    ),
+)
+
+# 2. Notifier reutilizable para Microsoft Teams (Webhook Adaptive Card)
+class TeamsWebhookNotifier(BaseNotifier):
+    template_fields: Sequence[str] = ("titulo", "resumen", "severidad")
+
+    def __init__(
+        self,
+        http_conn_id: str,
+        titulo: str,
+        resumen: str,
+        severidad: str = "ALTA",
+    ) -> None:
+        super().__init__()
+        self.http_conn_id = http_conn_id
+        self.titulo = titulo
+        self.resumen = resumen
+        self.severidad = severidad
+
+    def notify(self, context) -> None:
+        ti = context["ti"]
+        hook = HttpHook(method="POST", http_conn_id=self.http_conn_id)
+        tarjeta = {
+            "type": "message",
+            "attachments": [
+                {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard",
+                        "version": "1.4",
+                        "body": [
+                            {"type": "TextBlock", "weight": "Bolder", "text": self.titulo},
+                            {"type": "TextBlock", "wrap": True, "text": self.resumen},
+                            {
+                                "type": "FactSet",
+                                "facts": [
+                                    {"title": "Severidad", "value": self.severidad},
+                                    {"title": "DAG", "value": ti.dag_id},
+                                    {"title": "Task", "value": ti.task_id},
+                                    {"title": "Fecha lógica", "value": context["ds"]},
+                                ],
+                            },
+                        ],
+                        "actions": [
+                            {"type": "Action.OpenUrl", "title": "Ver Logs", "url": ti.log_url}
+                        ],
+                    },
+                }
+            ],
+        }
+        hook.run(
+            endpoint="",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(tarjeta),
+        )
+
+# Estrategia anti-fatiga: Slack en reintentos/fallos; PagerDuty o Teams Tier-1 solo en fallo final
+# default_args = {
+#     "retries": 3,
+#     "on_failure_callback": [alerta_slack_fallo, TeamsWebhookNotifier(...)],
+# }
+\end{lstlisting}
+
+\subsection{Linaje automático de datos con OpenLineage}
+
+Documentar manualmente qué tablas lee y escribe cada DAG fracasa sistemáticamente al cabo de pocas semanas. \textbf{OpenLineage} (estándar abierto de la \textit{LF AI \& Data Foundation}) resuelve el problema capturando el linaje \textbf{en tiempo de ejecución} mediante el proveedor oficial \pkg{apache-airflow-providers-openlineage}.
+
+Su mecanismo interno se basa en un \textit{Listener} que intercepta los eventos del ciclo de vida de cada tarea (\code{START}, \code{COMPLETE}, \code{FAIL}) e invoca al \textbf{Extractor} correspondiente del operador:
+\begin{itemize}
+  \item Para \code{SQLExecuteQueryOperator}, BigQuery y Snowflake, un analizador sintáctico SQL en Rust (\pkg{sqlparser-rs}) extrae automáticamente las tablas origen y destino (incluso a nivel de columna en versiones recientes) y consulta el esquema en el catálogo.
+  \item Para \code{ObjectStoragePath}, S3 y GCS registra las URIs de los conjuntos de datos de entrada y salida.
+  \item Para Spark y dbt/Cosmos enlaza el identificador de ejecución padre (\code{ParentRunFacet}), unificando en un único grafo tanto la orquestación de Airflow como las transformaciones internas de Spark o dbt.
+\end{itemize}
+
+Los eventos JSON se envían por HTTP o Kafka hacia un servidor de linaje y gobierno como \textbf{Marquez}, \textbf{DataHub} u \textbf{OpenMetadata}. La Figura~\ref{fig:openlineage-end-to-end} muestra la arquitectura completa de captura y explotación del linaje.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.75cm and 0.9cm]
+  % ==================== FILA SUPERIOR: PIPELINE DE DATOS ====================
+  \node[dbnode, minimum width=2.0cm] (src_kafka) at (0, 3.0) {Kafka / S3\\[-1pt]\scriptsize Bronze};
+  \node[archbox, text width=2.4cm] (op_spark) at (3.6, 3.0) {Spark / K8s\\[-1pt]\scriptsize Transformación};
+  \node[tealbox, text width=2.4cm] (op_dbt) at (7.3, 3.0) {dbt / SQL\\[-1pt]\scriptsize Silver $\rightarrow$ Gold};
+  \node[archbox, text width=2.4cm] (op_ml) at (11.0, 3.0) {MLflow Train\\[-1pt]\scriptsize Modelo Riesgo};
+
+  \draw[flowarrow] (src_kafka) -- (op_spark);
+  \draw[flowarrow] (op_spark) -- (op_dbt);
+  \draw[flowarrow] (op_dbt) -- (op_ml);
+
+  % ==================== FILA INTERMEDIA: LISTENER OPENLINEAGE ====================
+  \node[darkbox, text width=11.4cm, minimum height=0.95cm] (ol_listener) at (5.5, 1.15)
+    {Airflow OpenLineage Listener + Extractors (\texttt{sqlparser-rs}, S3/GCS, Spark/dbt ParentRunFacet)\\[-1pt]\scriptsize Emisión asíncrona de \texttt{RunEvent} (\texttt{START} / \texttt{COMPLETE} / \texttt{FAIL}) con \texttt{InputDataset}, \texttt{OutputDataset} y \texttt{DataQualityFacet}};
+
+  \draw[tealarrow] (src_kafka.south) -- (src_kafka.south |- ol_listener.north);
+  \draw[tealarrow] (op_spark.south) -- (op_spark.south |- ol_listener.north);
+  \draw[tealarrow] (op_dbt.south) -- (op_dbt.south |- ol_listener.north);
+  \draw[tealarrow] (op_ml.south) -- (op_ml.south |- ol_listener.north);
+
+  % ==================== FILA INFERIOR: BACKEND Y CASOS DE USO ====================
+  \node[tealbox, text width=3.6cm, minimum height=1.15cm] (marquez) at (2.0, -0.95)
+    {Backend de Linaje\\[-1pt]\scriptsize Marquez / DataHub / OpenMetadata\\[-1pt]\scriptsize Grafo histórico de datasets y runs};
+
+  \node[subbox, draw=PrimaryAccent, fill=InfoBg, text width=2.8cm, minimum height=1.05cm] (uc_impact) at (6.6, -0.95)
+    {\textbf{Análisis de Impacto}\\[-1pt]\scriptsize Qué modelos ML rompe un cambio de columna};
+
+  \node[subbox, draw=AmberAccent, fill=WarnBg, text width=2.8cm, minimum height=1.05cm] (uc_rca) at (9.9, -0.95)
+    {\textbf{Causa Raíz (RCA)}\\[-1pt]\scriptsize Origen exacto de un dato corrupto o nulo};
+
+  \draw[flowarrow] (ol_listener.south -| marquez.north) -- (marquez.north)
+    node[elabel, right=3pt, pos=0.5] {HTTP / Kafka};
+  \draw[flowarrow] (marquez.east) -- (uc_impact.west);
+  \draw[flowarrow] (uc_impact.east) -- (uc_rca.west);
+
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(src_kafka)(op_spark)(op_dbt)(op_ml), inner sep=8pt, label={[font=\sffamily\scriptsize\bfseries, text=MutedGray]above:Plano de Datos y Orquestación (Apache Airflow)}] {};
+  \end{scope}
+\end{tikzpicture}%
+}
+\caption{Captura automática de linaje \textit{end-to-end} mediante \pkg{apache-airflow-providers-openlineage} hacia Marquez o DataHub.}
+\label{fig:openlineage-end-to-end}
+\end{figure}
+
+La activación de OpenLineage no exige reescribir los DAGs existentes; se configura declarativamente mediante variables de entorno (o \code{airflow.cfg}), como ilustra el Listado~\ref{lst:openlineage-config}. En instalaciones con miles de tareas por hora resulta recomendable habilitar \code{SELECTIVE\_ENABLE} para emitir eventos únicamente en DAGs críticos o usar transporte Kafka en lugar de HTTP síncrono.
+
+\begin{lstlisting}[style=yaml, caption={Configuración de OpenLineage en el Helm Chart de Airflow (variables de entorno hacia Marquez/DataHub).}, label={lst:openlineage-config}]
+# Fragmento values.yaml del Helm Chart oficial de Apache Airflow
+env:
+  - name: AIRFLOW__OPENLINEAGE__DISABLED
+    value: "false"
+  - name: AIRFLOW__OPENLINEAGE__NAMESPACE
+    value: "airflow-prod-eu-west-1"
+  - name: AIRFLOW__OPENLINEAGE__TRANSPORT
+    value: >-
+      {
+        "type": "http",
+        "url": "https://marquez.observabilidad.interno",
+        "endpoint": "api/v1/lineage",
+        "timeout": 5.0,
+        "auth": {
+          "type": "api_key",
+          "apiKey": "TOKEN_INYECTADO_DESDE_SECRET"
+        }
+      }
+  # Opcional: desactivar operadores ruidosos o habilitar por etiquetas selectivas
+  - name: AIRFLOW__OPENLINEAGE__DISABLED_FOR_OPERATORS
+    value: "airflow.operators.bash.BashOperator"
+  - name: AIRFLOW__OPENLINEAGE__SELECTIVE_ENABLE
+    value: "false"
+\end{lstlisting}
+
+% ============================================================================
+\section{Diseño, Programación, Empaquetado y Pruebas de un Conector Propio}\label{sec:custom-provider}
+% ============================================================================
+
+A pesar de que el ecosistema oficial de Apache Airflow supera el centenar de \textit{providers}, tarde o temprano cualquier organización mediana o grande necesita conectar con un sistema propietario: una API corporativa de CRM o facturación, un ERP heredado (SAP con RFCs a medida, Navision) o una plataforma interna de inferencia ML.
+
+\subsection{¿Cuándo merece la pena construir un \textit{Custom Provider}?}
+
+La regla de ingeniería es pragmática: si solo un DAG necesita invocar un \textit{endpoint} interno una vez al día, utilice \code{HttpHook} dentro de un \code{@task}. Sin embargo, cuando \textbf{tres o más DAGs o varios equipos} dependen del mismo sistema propietario, merece la pena encapsular la integración en un paquete \textbf{Custom Provider} instalable e internamente versionado (\code{pip install mi-crm-airflow-provider}). Este enfoque centraliza la autenticación, ofrece un formulario limpio en la interfaz de Connections, evita duplicación de lógica de reintentos y permite habilitar ejecución \textit{deferrable} transparente para todos los usuarios.
+
+\begin{examplebox}[Caso práctico completo: \texttt{mi-crm-airflow-provider}]
+Diseñaremos un conector corporativo completo para un sistema \textbf{MiCRM} que expone exportaciones masivas asíncronas: (1) una llamada \code{POST /v1/exports} inicia la exportación y devuelve un \code{job\_id}; (2) se consulta \code{GET /v1/exports/\{job\_id\}} hasta obtener estado \code{COMPLETED} y una URL prefirmada; y (3) el resultado se descarga directamente a Object Storage. La estructura estándar del paquete es:
+\begin{verbatim}
+mi-crm-airflow-provider/
+|-- pyproject.toml
+|-- mi_crm_provider/
+|   |-- __init__.py          # get_provider_info() para auto-descubrimiento
+|   |-- hooks/mi_crm.py      # MiCrmHook(BaseHook)
+|   |-- triggers/mi_crm.py   # MiCrmExportTrigger(BaseTrigger)
+|   `-- operators/mi_crm.py  # MiCrmExportOperator(BaseOperator)
+`-- tests/
+    `-- test_mi_crm_provider.py
+\end{verbatim}
+\end{examplebox}
+
+\subsection{Paso 1: El Hook (\texttt{MiCrmHook}) con interfaz UI y prueba de conexión}
+
+El \textit{Hook} encapsula toda comunicación con MiCRM, personaliza el formulario de la interfaz web de Airflow mediante \code{get\_ui\_field\_behaviour()} (ocultando campos irrelevantes como \code{port} o \code{schema}) e implementa \code{test\_connection()} para habilitar el botón \textit{«Test»} en la pantalla de Connections.
+
+\begin{lstlisting}[style=python, caption={Implementación de \texttt{MiCrmHook} (\texttt{mi\_crm\_provider/hooks/mi\_crm.py}).}, label={lst:custom-hook}]
+from typing import Any
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from airflow.hooks.base import BaseHook
+from airflow.io.path import ObjectStoragePath
+
+class MiCrmHook(BaseHook):
+    """Hook corporativo para la API asíncrona de MiCRM."""
+
+    conn_name_attr = "mi_crm_conn_id"
+    default_conn_name = "mi_crm_default"
+    conn_type = "mi_crm"
+    hook_name = "MiCRM Corporativo"
+
+    def __init__(self, mi_crm_conn_id: str = default_conn_name) -> None:
+        super().__init__()
+        self.mi_crm_conn_id = mi_crm_conn_id
+        self._session: requests.Session | None = None
+        self._base_url: str | None = None
+        self._timeout: int = 30
+
+    @classmethod
+    def get_ui_field_behaviour(cls) -> dict[str, Any]:
+        """Personaliza los campos visibles al crear una Connection en la UI."""
+        return {
+            "hidden_fields": ["port", "schema", "login"],
+            "relabeling": {
+                "host": "URL Base de la API MiCRM",
+                "password": "API Token (Bearer)",
+                "extra": "Parámetros JSON (tenant_id, timeout)",
+            },
+            "placeholders": {
+                "host": "https://api.micrm.empresa.io",
+                "extra": '{"tenant_id": "es-corp", "timeout": 30}',
+            },
+        }
+
+    def get_conn(self) -> requests.Session:
+        """Crea y reutiliza una sesión HTTP con reintentos ante fallos 5xx/429."""
+        if self._session is not None:
+            return self._session
+
+        conn = self.get_connection(self.mi_crm_conn_id)
+        if not conn.host or not conn.password:
+            raise ValueError(
+                f"La conexión '{self.mi_crm_conn_id}' requiere 'host' y 'password'."
+            )
+
+        extras = conn.extra_dejson
+        self._base_url = conn.host.rstrip("/")
+        self._timeout = int(extras.get("timeout", 30))
+
+        session = requests.Session()
+        retry_policy = Retry(
+            total=4,
+            backoff_factor=1.0,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"],
+        )
+        session.mount("https://", HTTPAdapter(max_retries=retry_policy))
+        session.mount("http://", HTTPAdapter(max_retries=retry_policy))
+        session.headers.update({
+            "Authorization": f"Bearer {conn.password}",
+            "X-Tenant-ID": str(extras.get("tenant_id", "default")),
+            "Accept": "application/json",
+        })
+        self._session = session
+        return self._session
+
+    def test_connection(self) -> tuple[bool, str]:
+        """Valida conectividad y credenciales desde la UI de Airflow."""
+        try:
+            session = self.get_conn()
+            resp = session.get(f"{self._base_url}/v1/health", timeout=10)
+            resp.raise_for_status()
+            return True, "Conexión verificada correctamente contra MiCRM."
+        except Exception as exc:
+            return False, f"Error conectando con MiCRM: {exc}"
+
+    def start_export_job(self, entity: str, since_date: str) -> str:
+        session = self.get_conn()
+        resp = session.post(
+            f"{self._base_url}/v1/exports",
+            json={"entity": entity, "since_date": since_date, "format": "parquet"},
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        return str(resp.json()["job_id"])
+
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
+        session = self.get_conn()
+        resp = session.get(
+            f"{self._base_url}/v1/exports/{job_id}", timeout=self._timeout
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def download_export_to_path(self, download_url: str, target_uri: str) -> int:
+        """Descarga en streaming hacia ObjectStoragePath sin cargar todo en RAM."""
+        session = self.get_conn()
+        destino = ObjectStoragePath(target_uri)
+        bytes_escritos = 0
+        with session.get(download_url, stream=True, timeout=120) as resp:
+            resp.raise_for_status()
+            with destino.open("wb") as f_out:
+                for bloque in resp.iter_content(chunk_size=1024 * 1024):
+                    if bloque:
+                        f_out.write(bloque)
+                        bytes_escritos += len(bloque)
+        return bytes_escritos
+\end{lstlisting}
+
+\subsection{Paso 2: El Trigger asíncrono (\texttt{MiCrmExportTrigger})}
+
+El \textit{Trigger} se ejecuta dentro del bucle de eventos \pkg{asyncio} del proceso \textit{Triggerer}. Debe respetar dos invariantes estrictos: (1) \code{serialize()} debe devolver únicamente tipos serializables en JSON para que el \textit{Triggerer} pueda reconstruirlo tras un reinicio, y (2) \code{async def run()} debe usar exclusivamente E/S no bloqueante (\pkg{aiohttp}, \code{asyncio.sleep}); jamás \pkg{requests} ni \code{time.sleep}, pues congelarían a cientos de tareas diferidas concurrentes.
+
+\begin{lstlisting}[style=python, caption={Implementación del Trigger asíncrono (\texttt{mi\_crm\_provider/triggers/mi\_crm.py}).}, label={lst:custom-trigger}]
+import asyncio
+import time
+from typing import Any, AsyncIterator
+import aiohttp
+from airflow.hooks.base import BaseHook
+from airflow.triggers.base import BaseTrigger, TriggerEvent
+
+class MiCrmExportTrigger(BaseTrigger):
+    """Vigila asíncronamente un trabajo de exportación en MiCRM sin ocupar workers."""
+
+    def __init__(
+        self,
+        job_id: str,
+        mi_crm_conn_id: str = "mi_crm_default",
+        poll_interval: float = 15.0,
+        timeout: float = 3600.0,
+    ) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.mi_crm_conn_id = mi_crm_conn_id
+        self.poll_interval = poll_interval
+        self.timeout = timeout
+
+    def serialize(self) -> tuple[str, dict[str, Any]]:
+        """Ruta importable de la clase y argumentos JSON-serializables."""
+        return (
+            "mi_crm_provider.triggers.mi_crm.MiCrmExportTrigger",
+            {
+                "job_id": self.job_id,
+                "mi_crm_conn_id": self.mi_crm_conn_id,
+                "poll_interval": self.poll_interval,
+                "timeout": self.timeout,
+            },
+        )
+
+    async def run(self) -> AsyncIterator[TriggerEvent]:
+        inicio = time.monotonic()
+        # Resolución de conexión (ejecutada en hilo auxiliar para no bloquear asyncio)
+        conn = await asyncio.to_thread(BaseHook.get_connection, self.mi_crm_conn_id)
+        base_url = conn.host.rstrip("/")
+        headers = {
+            "Authorization": f"Bearer {conn.password}",
+            "X-Tenant-ID": str(conn.extra_dejson.get("tenant_id", "default")),
+        }
+
+        async with aiohttp.ClientSession(headers=headers) as session:
+            while True:
+                if time.monotonic() - inicio > self.timeout:
+                    yield TriggerEvent({
+                        "status": "error",
+                        "message": f"Timeout esperando job {self.job_id} en MiCRM.",
+                    })
+                    return
+
+                try:
+                    url = f"{base_url}/v1/exports/{self.job_id}"
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                        resp.raise_for_status()
+                        datos = await resp.json()
+                except Exception as exc:
+                    self.log.warning("Error transitorio consultando %s: %s", self.job_id, exc)
+                    await asyncio.sleep(self.poll_interval)
+                    continue
+
+                estado = datos.get("status")
+                if estado == "COMPLETED":
+                    yield TriggerEvent({
+                        "status": "success",
+                        "job_id": self.job_id,
+                        "download_url": datos["download_url"],
+                        "row_count": int(datos.get("row_count", 0)),
+                    })
+                    return
+                if estado in ("FAILED", "CANCELLED"):
+                    yield TriggerEvent({
+                        "status": "error",
+                        "message": f"Job {self.job_id} terminó con estado {estado}: {datos.get('error')}",
+                    })
+                    return
+
+                await asyncio.sleep(self.poll_interval)
+\end{lstlisting}
+
+\subsection{Paso 3: El Operador \textit{Deferrable} (\texttt{MiCrmExportOperator})}
+
+El operador coordina el ciclo completo: declara \code{template\_fields} para admitir Jinja en sus argumentos, lanza la exportación en \code{execute()}, difiere la espera con \code{self.defer(...)} cuando \code{deferrable=True} y reanuda la descarga en \code{execute\_complete()} una vez que el \textit{Triggerer} emite el \code{TriggerEvent}.
+
+\begin{lstlisting}[style=python, caption={Operador diferible (\texttt{mi\_crm\_provider/operators/mi\_crm.py}).}, label={lst:custom-operator}]
+import time
+from typing import Any, Sequence
+from airflow.exceptions import AirflowException
+from airflow.models.baseoperator import BaseOperator
+from mi_crm_provider.hooks.mi_crm import MiCrmHook
+from mi_crm_provider.triggers.mi_crm import MiCrmExportTrigger
+
+class MiCrmExportOperator(BaseOperator):
+    """Exporta una entidad de MiCRM a Object Storage con soporte deferrable."""
+
+    template_fields: Sequence[str] = ("entity", "since_date", "target_uri")
+    ui_color = "#e0f2fe"
+
+    def __init__(
+        self,
+        *,
+        entity: str,
+        since_date: str,
+        target_uri: str,
+        mi_crm_conn_id: str = MiCrmHook.default_conn_name,
+        deferrable: bool = True,
+        poll_interval: float = 15.0,
+        timeout: float = 3600.0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.entity = entity
+        self.since_date = since_date
+        self.target_uri = target_uri
+        self.mi_crm_conn_id = mi_crm_conn_id
+        self.deferrable = deferrable
+        self.poll_interval = poll_interval
+        self.timeout = timeout
+
+    def execute(self, context: dict[str, Any]) -> dict[str, Any]:
+        hook = MiCrmHook(mi_crm_conn_id=self.mi_crm_conn_id)
+        job_id = hook.start_export_job(entity=self.entity, since_date=self.since_date)
+        self.log.info("Exportación MiCRM iniciada: entity=%s, job_id=%s", self.entity, job_id)
+
+        if self.deferrable:
+            # Libera el worker inmediatamente; reanudará en execute_complete()
+            self.defer(
+                trigger=MiCrmExportTrigger(
+                    job_id=job_id,
+                    mi_crm_conn_id=self.mi_crm_conn_id,
+                    poll_interval=self.poll_interval,
+                    timeout=self.timeout,
+                ),
+                method_name="execute_complete",
+            )
+
+        # Modo síncrono de respaldo (útil si el entorno carece de Triggerer)
+        inicio = time.monotonic()
+        while True:
+            if time.monotonic() - inicio > self.timeout:
+                raise AirflowException(f"Timeout síncrono esperando job {job_id}.")
+            datos = hook.get_job_status(job_id)
+            if datos.get("status") == "COMPLETED":
+                return self._finalizar_descarga(
+                    hook, job_id, datos["download_url"], int(datos.get("row_count", 0))
+                )
+            if datos.get("status") in ("FAILED", "CANCELLED"):
+                raise AirflowException(f"Fallo en MiCRM job {job_id}: {datos}")
+            time.sleep(self.poll_interval)
+
+    def execute_complete(
+        self, context: dict[str, Any], event: dict[str, Any]
+    ) -> dict[str, Any]:
+        if event.get("status") != "success":
+            raise AirflowException(event.get("message", "Error desconocido en MiCRM."))
+
+        hook = MiCrmHook(mi_crm_conn_id=self.mi_crm_conn_id)
+        return self._finalizar_descarga(
+            hook=hook,
+            job_id=event["job_id"],
+            download_url=event["download_url"],
+            row_count=event["row_count"],
+        )
+
+    def _finalizar_descarga(
+        self, hook: MiCrmHook, job_id: str, download_url: str, row_count: int
+    ) -> dict[str, Any]:
+        bytes_escritos = hook.download_export_to_path(download_url, self.target_uri)
+        return {
+            "job_id": job_id,
+            "target_uri": self.target_uri,
+            "row_count": row_count,
+            "bytes": bytes_escritos,
+        }
+\end{lstlisting}
+
+\subsection{Paso 4: Empaquetado y auto-descubrimiento (\texttt{pyproject.toml} y \texttt{get\_provider\_info})}
+
+Para que Apache Airflow registre automáticamente el nuevo tipo de conexión \code{mi\_crm} en la interfaz web y en el CLI (\code{airflow providers list}) al instalar la rueda Python (\code{.whl}), el paquete debe exponer un \textit{entry point} en el grupo \code{apache\_airflow\_provider} apuntando a la función \code{get\_provider\_info()}.
+
+\begin{lstlisting}[style=python, caption={Registro del proveedor (\texttt{mi\_crm\_provider/\_\_init\_\_.py}) y manifiesto \texttt{pyproject.toml}.}, label={lst:custom-packaging}]
+# === Archivo: mi_crm_provider/__init__.py ===
+__version__ = "1.0.0"
+
+def get_provider_info() -> dict:
+    return {
+        "package-name": "mi-crm-airflow-provider",
+        "name": "MiCRM Corporativo",
+        "description": "Conector oficial interno para exportaciones asíncronas de MiCRM.",
+        "versions": [__version__],
+        "connection-types": [
+            {
+                "hook-class-name": "mi_crm_provider.hooks.mi_crm.MiCrmHook",
+                "connection-type": "mi_crm",
+            }
+        ],
+    }
+
+# === Archivo: pyproject.toml ===
+# [build-system]
+# requires = ["hatchling>=1.24"]
+# build-backend = "hatchling.build"
+#
+# [project]
+# name = "mi-crm-airflow-provider"
+# version = "1.0.0"
+# requires-python = ">=3.10"
+# dependencies = [
+#     "apache-airflow>=2.10.0",
+#     "apache-airflow-providers-common-io>=1.4.0",
+#     "aiohttp>=3.9.0",
+#     "requests>=2.31.0",
+# ]
+#
+# [project.entry-points."apache_airflow_provider"]
+# provider_info = "mi_crm_provider:get_provider_info"
+\end{lstlisting}
+
+\subsection{Paso 5: Pruebas unitarias deterministas con \texttt{pytest} y \texttt{unittest.mock}}
+
+Un conector de producción nunca debe integrarse en el repositorio corporativo sin pruebas unitarias rápidas que verifiquen el \textit{Hook}, la serialización del \textit{Trigger}, el diferimiento (\code{TaskDeferred}) y el manejo de errores de \code{execute\_complete()} sin realizar llamadas de red reales.
+
+\begin{lstlisting}[style=python, caption={Suite de pruebas unitarias para \texttt{MiCrmHook} y \texttt{MiCrmExportOperator} (\texttt{tests/test\_mi\_crm\_provider.py}).}, label={lst:custom-tests}]
+from unittest.mock import MagicMock, patch
+import pytest
+from airflow.exceptions import AirflowException, TaskDeferred
+from airflow.models import Connection
+from mi_crm_provider.hooks.mi_crm import MiCrmHook
+from mi_crm_provider.operators.mi_crm import MiCrmExportOperator
+from mi_crm_provider.triggers.mi_crm import MiCrmExportTrigger
+
+@pytest.fixture
+def conexion_micrm_mock():
+    return Connection(
+        conn_id="mi_crm_test",
+        conn_type="mi_crm",
+        host="https://api.micrm.test",
+        password="token-secreto-simulado",
+        extra='{"tenant_id": "es-qa", "timeout": 10}',
+    )
+
+def test_hook_start_export_job(conexion_micrm_mock):
+    respuesta_mock = MagicMock()
+    respuesta_mock.json.return_value = {"job_id": "exp-2025-001"}
+    respuesta_mock.raise_for_status.return_value = None
+
+    with (
+        patch.object(MiCrmHook, "get_connection", return_value=conexion_micrm_mock),
+        patch("requests.Session.post", return_value=respuesta_mock) as mock_post,
+    ):
+        hook = MiCrmHook(mi_crm_conn_id="mi_crm_test")
+        job_id = hook.start_export_job(entity="clientes", since_date="2025-11-01")
+
+        assert job_id == "exp-2025-001"
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        assert args[0] == "https://api.micrm.test/v1/exports"
+        assert kwargs["json"]["entity"] == "clientes"
+
+def test_operator_execute_defers_correctly():
+    op = MiCrmExportOperator(
+        task_id="exportar_clientes",
+        entity="clientes",
+        since_date="2025-11-01",
+        target_uri="s3://aws_test@bucket/clientes.parquet",
+        mi_crm_conn_id="mi_crm_test",
+        deferrable=True,
+    )
+    with patch.object(MiCrmHook, "start_export_job", return_value="exp-99"):
+        with pytest.raises(TaskDeferred) as exc_info:
+            op.execute(context={})
+
+    assert isinstance(exc_info.value.trigger, MiCrmExportTrigger)
+    assert exc_info.value.method_name == "execute_complete"
+    classpath, kwargs = exc_info.value.trigger.serialize()
+    assert classpath.endswith("MiCrmExportTrigger")
+    assert kwargs["job_id"] == "exp-99"
+
+def test_operator_execute_complete_success_and_failure():
+    op = MiCrmExportOperator(
+        task_id="exportar_clientes",
+        entity="clientes",
+        since_date="2025-11-01",
+        target_uri="s3://aws_test@bucket/clientes.parquet",
+        mi_crm_conn_id="mi_crm_test",
+    )
+
+    with patch.object(MiCrmHook, "download_export_to_path", return_value=4096) as mock_dl:
+        resultado = op.execute_complete(
+            context={},
+            event={
+                "status": "success",
+                "job_id": "exp-99",
+                "download_url": "https://cdn.micrm.test/exp-99.parquet",
+                "row_count": 250,
+            },
+        )
+        assert resultado["bytes"] == 4096
+        assert resultado["row_count"] == 250
+        mock_dl.assert_called_once()
+
+    with pytest.raises(AirflowException, match="Timeout"):
+        op.execute_complete(
+            context={},
+            event={"status": "error", "message": "Timeout esperando job exp-99"},
+        )
+\end{lstlisting}
+
+% ============================================================================
+\section{Lista de Verificación de Conectividad en Producción}\label{sec:checklist-conectividad}
+% ============================================================================
+
+Antes de promocionar cualquier DAG conectado con sistemas externos desde integración a producción, conviene auditar ocho controles transversales que sintetizan todo lo cubierto en los capítulos 4 y 5:
+
+\begin{infobox}[Checklist de auditoría de conectores antes de pasar a producción]
+\begin{enumerate}
+  \item \textbf{Cero secretos en código ni en DAGs:} todas las credenciales residen en un \textit{Secrets Backend} o \textit{Kubernetes Secrets}; las consultas parametrizadas usan \code{parameters} frente a interpolación Jinja de entradas no confiables.
+  \item \textbf{Operadores modernos y mantenidos:} \code{SQLExecuteQueryOperator}, \code{HttpOperator}, \code{ObjectStoragePath} y \code{DbtTaskGroup} en lugar de operadores deprecados o monolíticos.
+  \item \textbf{Plano de datos fuera del worker:} transferencias masivas delegadas a \code{COPY INTO}, BigQuery Load Jobs, Spark o \textit{streaming} por bloques con \code{ParquetWriter}; XCom estrictamente restringido a URIs y métricas escalares.
+  \item \textbf{Esperas asíncronas:} todos los sensores de larga duración y trabajos remotos (BigQuery, EMR Serverless, Databricks, K8sPod, Kafka, Custom Triggers) configurados con \code{deferrable=True}.
+  \item \textbf{Idempotencia verificada:} cada tarea de escritura puede reejecutarse para el mismo \code{ds} sin duplicar registros (\code{DELETE+INSERT} transaccional, \code{MERGE}, \code{WRITE\_TRUNCATE} por partición o sobreescritura determinista de ficheros).
+  \item \textbf{Límites de coste y tiempo (FinOps):} \code{maximumBytesBilled}, \code{statement\_timeout}, \code{max\_messages}, \code{execution\_timeout} y límites de CPU/RAM/GPU definidos explícitamente.
+  \item \textbf{Compuertas de calidad y alertas útiles:} \code{SQLColumnCheckOperator}/\code{SQLTableCheckOperator} o tests dbt antes de publicar a Gold; \textit{Notifiers} con enlaces directos a trazas y enrutamiento por severidad.
+  \item \textbf{Trazabilidad y pruebas:} OpenLineage habilitado hacia Marquez/DataHub y conectores internos empaquetados con tests unitarios \pkg{pytest} sin dependencias de red.
+\end{enumerate}
+\end{infobox}
+
+Con el dominio completo de la arquitectura de Apache Airflow y de su ecosistema práctico de conectores, contamos ya con una base sólida de ingeniería de datos para dar el salto hacia la segunda gran vertiente del manual: la operacionalización rigurosa del ciclo de vida del aprendizaje automático (\textbf{MLOps}) y de los sistemas basados en Grandes Modelos de Lenguaje (\textbf{LLMOps}) con \textbf{MLflow 3}.

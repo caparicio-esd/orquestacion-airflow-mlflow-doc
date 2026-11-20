@@ -1,0 +1,175 @@
+% ============================================================================
+% B_glosario.tex — Apéndice B: Glosario Técnico
+% ============================================================================
+
+\chapter[Glosario Técnico]{Glosario Técnico de Orquestación, MLOps y LLMOps}\label{app:glosario}
+
+Este glosario reúne en orden alfabético los conceptos arquitectónicos, estadísticos y operativos clave utilizados a lo largo del manual para Apache Airflow~(2.10/3.0+), MLOps clásico y LLMOps con MLflow~3.
+
+{\small
+\begin{description}[style=standard, itemsep=2pt, parsep=0pt, topsep=4pt, leftmargin=1.1em, font=\sffamily\bfseries\color{PrimaryDark}]
+
+\item[AI Gateway.]
+Servicio intermediario centralizado (en MLflow: \textit{MLflow AI Gateway} / \textit{Deployments Server}) que unifica el acceso a múltiples proveedores de modelos fundacionales y \textit{embeddings} (OpenAI, Anthropic, Bedrock, vLLM) tras una API homogénea, centralizando claves, cuotas de \textit{tokens}, \textit{rate limiting} y conmutación ante fallos (\textit{fallback}).
+
+\item[Alias (MLflow Registry).]
+Puntero mutable con nombre semántico (\code{@champion}, \code{@challenger}, \code{@staging}, \code{@production}) asociado a una versión inmutable de un modelo en el \textit{Model Registry} o de una plantilla en el \textit{Prompt Registry}. Sustituye a los antiguos \textit{Stages} deprecados y permite promociones y \textit{rollbacks} atómicos.
+
+\item[Asset (Airflow 3).]
+Abstracción de primera clase introducida en Airflow~3 (evolución de \code{Dataset} en 2.4+) que representa un activo de datos lógico (\code{Asset(\textquotedbl{}s3://kb-prod/corpus-indexado\textquotedbl{})}) con planificación dirigida por datos, metadatos por actualización y desacoplamiento entre DAGs productores y consumidores.
+
+\item[Backfill.]
+Ejecución controlada de un DAG sobre un rango histórico de fechas lógicas pasadas para poblar o reprocesar particiones. En Airflow~3 los \textit{backfills} son recursos gestionados por el \textit{Scheduler} con seguimiento nativo en la UI y la API REST.
+
+\item[Blue/Green Deployment.]
+Estrategia de despliegue con dos entornos de producción idénticos (\textit{Blue} activo y \textit{Green} candidato): tras validar \textit{Green}, el balanceador conmuta todo el tráfico instantáneamente, manteniendo \textit{Blue} listo para \textit{rollback} inmediato.
+
+\item[Branching.]
+Patrón de flujo condicional en Airflow (\code{@task.branch} o \code{BranchPythonOperator}) que evalúa una condición en ejecución y devuelve el \code{task\_id} de la rama activa, marcando automáticamente como \code{skipped} las ramas no seleccionadas.
+
+\item[Canary Deployment.]
+Despliegue progresivo que dirige un pequeño porcentaje inicial del tráfico real (1\,\%, 5\,\%, 10\,\%) hacia la nueva versión del modelo o \textit{prompt} mientras monitoriza métricas operativas y de negocio antes de ampliar la exposición.
+
+\item[Catchup.]
+Parámetro booleano de planificación del DAG (\code{catchup=True/False}): cuando está activo, el \textit{Scheduler} genera un \textit{DagRun} por cada intervalo lógico pendiente desde \code{start\_date} hasta el presente; exige tareas estrictamente idempotentes.
+
+\item[Concept Drift.]
+Cambio temporal en la relación condicional $P(Y \mid X)$ entre entradas $X$ y objetivo $Y$ (por ejemplo, nuevas tácticas de fraude), que degrada la precisión predictiva aunque la distribución marginal $P(X)$ no varíe.
+
+\item[Connection (Airflow).]
+Objeto de configuración (cifrado en metadatos, en \code{AIRFLOW\_CONN\_*} o en un \textit{Secrets Backend}) que encapsula credenciales y parámetros de red (\code{host}, \code{port}, \code{schema}, \code{login}, \code{password}, \code{extra}) consumidos por los \textit{Hooks}.
+
+\item[DAG (Directed Acyclic Graph).]
+Grafo dirigido acíclico que modela un flujo de trabajo en Airflow: los nodos son tareas (\textit{Tasks}) y las aristas dirigidas especifican precedencias y dependencias sin ciclos.
+
+\item[DAG Bundle (Airflow 3).]
+Mecanismo de empaquetado y versionado de Airflow~3 que distribuye instantáneas inmutables del código fuente de los DAGs (desde Git o almacenamiento de objetos), garantizando consistencia de versión en todas las tareas de un \textit{DagRun}.
+
+\item[Data Contract.]
+Acuerdo explícito y verificable automáticamente (Pandera, Great Expectations, Soda) entre productores y consumidores de datos sobre esquema, tipos, nulabilidad, rangos de dominio y frescura.
+
+\item[Data Drift (Covariate Shift).]
+Desplazamiento estadístico en la distribución de las variables de entrada $P(X)$ en producción frente a los datos de entrenamiento, detectable sin esperar etiquetas mediante PSI, prueba KS o distancia de Wasserstein.
+
+\item[Deferrable Operator.]
+Operador o sensor asíncrono capaz de suspenderse con \code{self.defer()}, liberando su \textit{worker slot} y delegando la espera en un \textit{Trigger} \code{asyncio} dentro del componente \textit{Triggerer}.
+
+\item[DSPy.]
+\textit{Framework} declarativo de Stanford que modela flujos con LLMs mediante firmas tipadas y módulos componibles, permitiendo \textit{compilar} y optimizar automáticamente \textit{prompts} y ejemplos \textit{few-shot} según una métrica objetivo.
+
+\item[Dynamic Task Mapping.]
+Primitiva de Airflow (\code{.expand()} y \code{.partial()}) que instancia dinámicamente un número variable de tareas paralelas en tiempo de ejecución a partir de la salida de una tarea previa.
+
+\item[Feature Store.]
+Repositorio centralizado de variables de entrada para ML (Feast, Tecton, Hopsworks) con almacén \textit{offline} (\textit{point-in-time joins}) y almacén \textit{online} de baja latencia, garantizando reutilización y consistencia entrenamiento/inferencia.
+
+\item[Fernet Key.]
+Clave simétrica Base64 de 32~bytes (\code{AIRFLOW\_\_CORE\_\_FERNET\_KEY}) utilizada por Airflow para cifrar en reposo las contraseñas de \textit{Connections} y \textit{Variables} en la base de datos de metadatos.
+
+\item[GEPA (Genetic-Pareto Prompt Optimization).]
+Algoritmo evolutivo y reflexivo de optimización de \textit{prompts} integrado en DSPy y MLflow~3 (\code{mlflow.genai.optimize\_prompts}) que emplea trazas de fallos y selección en frontera de Pareto para mejorar conjuntamente calidad, seguridad y coste.
+
+\item[Golden Dataset.]
+Banco de evaluación curado, representativo y versionado (entradas, contextos esperados y respuestas de referencia) utilizado en los \textit{quality gates} de pipelines MLOps y LLMOps para detectar regresiones.
+
+\item[Hook (Airflow).]
+Interfaz Python de alto nivel dentro de un \textit{Provider} (\code{PostgresHook}, \code{S3Hook}, \code{HttpHook}) que consume una \textit{Connection} y abstrae la interacción programática con sistemas externos.
+
+\item[Idempotencia.]
+Propiedad por la cual ejecutar una tarea o consulta una o $N$ veces con los mismos parámetros y fecha lógica produce exactamente el mismo estado final, sin duplicados ni efectos colaterales.
+
+\item[Label Drift.]
+Variación temporal en la distribución marginal de la variable objetivo $P(Y)$ respecto al entrenamiento, que descalibra probabilidades predichas y umbrales de clasificación.
+
+\item[LLM-as-a-Judge.]
+Técnica de evaluación automatizada donde un LLM calibrado puntúa salidas generativas conforme a rúbricas estructuradas (fidelidad, exactitud, seguridad), devolviendo puntuación cuantitativa y justificación auditable.
+
+\item[LoggedModel (MLflow 3).]
+Entidad de primera clase en MLflow~3 que identifica de forma persistente un modelo o aplicación GenAI independientemente de un único \textit{run}, enlazando múltiples evaluaciones, datasets, trazas y versiones registradas.
+
+\item[Medallion Architecture.]
+Organización progresiva de \textit{Data Lakes}/\textit{Lakehouses} en tres capas: \textit{Bronze} (datos crudos inmutables), \textit{Silver} (limpios y conformados) y \textit{Gold} (agregados y \textit{features} listos para analítica y ML).
+
+\item[MLflow Tracking.]
+Componente de MLflow (API y servidor) para registrar, consultar y comparar experimentos mediante \textit{runs}, parámetros, métricas, etiquetas de linaje, datasets de entrada y artefactos inmutables.
+
+\item[Model Registry.]
+Catálogo centralizado de MLflow que gobierna modelos aprobados mediante versiones secuenciales inmutables, etiquetas de validación y punteros \textit{Aliases} (\code{@challenger}, \code{@champion}).
+
+\item[Models from Code.]
+Patrón de empaquetado recomendado en MLflow~3 para cadenas RAG y agentes: en lugar de serializar objetos frágiles con \code{pickle}/\code{cloudpickle}, registra el código fuente Python declarativo que reconstruye la aplicación al cargarse.
+
+\item[ObjectStoragePath.]
+Interfaz unificada tipo \code{pathlib} en Apache Airflow para operar de forma agnóstica sobre almacenamiento de objetos (S3, MinIO, GCS, Azure Blob, local) delegando la autenticación en un \code{conn\_id}.
+
+\item[OpenLineage.]
+Especificación abierta de eventos JSON para capturar y propagar linaje de datos extremo a extremo entre Airflow, Spark, dbt y catálogos de metadatos como Marquez o DataHub.
+
+\item[Prompt Injection.]
+Ataque sobre sistemas LLM donde instrucciones maliciosas en la consulta del usuario o en documentos recuperados por RAG anulan las directrices del sistema, exfiltran datos o disparan herramientas no autorizadas.
+
+\item[Prompt Registry.]
+Registro nativo de MLflow~3 para versionar centralizadamente plantillas de \textit{prompts} parametrizadas, gestionar su ciclo de vida con \textit{Aliases} (\code{@staging}, \code{@production}) y cargarlas mediante \code{prompts:/nombre@alias}.
+
+\item[Provider (Airflow).]
+Paquete Python modular (\pkg{apache-airflow-providers-*}) que extiende Airflow con operadores, sensores, \textit{Hooks}, \textit{Triggers} y gestores de secretos para una plataforma o nube específica.
+
+\item[PSI (Population Stability Index).]
+Estadístico no paramétrico basado en la divergencia de Jeffreys que mide el cambio distribucional de una variable entre referencia y producción: $<0{,}10$ estable, $0{,}10\text{--}0{,}20$ moderado, $\ge 0{,}20$ deriva significativa.
+
+\item[Quality Gate.]
+Barrera automatizada de verificación en un DAG o pipeline CI/CD que exige superar umbrales objetivos de calidad de datos, rendimiento \textit{holdout}/\textit{Golden Dataset}, seguridad y coste antes de promocionar a producción.
+
+\item[RAG (Retrieval-Augmented Generation).]
+Patrón de IA generativa que recupera fragmentos relevantes desde una base de conocimiento externa (búsqueda vectorial o híbrida) y los inyecta en el contexto del LLM para fundamentar respuestas verificables.
+
+\item[ResponsesAgent.]
+Interfaz estandarizada de MLflow~3 (\code{mlflow.pyfunc.ResponsesAgent}) compatible con respuestas multi-turno y \textit{tool calling}, que unifica empaquetado, trazado automático, evaluación y servicio de agentes.
+
+\item[Scheduled Scorer.]
+Evaluador programado en MLflow~3 que analiza periódicamente muestras de trazas reales en producción para detectar degradaciones silenciosas de calidad, seguridad o latencia.
+
+\item[Secrets Backend.]
+Integración configurable de Airflow (\code{AIRFLOW\_\_SECRETS\_\_BACKEND}) con bóvedas externas (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager, Azure Key Vault) para resolver secretos dinámicamente sin guardarlos en la BD.
+
+\item[Sensor.]
+Operador especializado en esperar una condición externa (fichero, partición, API, tarea de otro DAG). Debe emplear \code{mode=\textquotedbl{}reschedule\textquotedbl{}} o ser diferible cuando la espera excede un minuto.
+
+\item[Shadow Deployment.]
+Despliegue paralelo sin riesgo en el que el modelo candidato procesa una copia del tráfico real y registra sus predicciones para comparación, mientras solo el \code{@champion} responde a los usuarios.
+
+\item[Span (Tracing).]
+Unidad atómica dentro de una traza OpenTelemetry en MLflow~3 (consulta al \textit{retriever}, llamada al LLM, ejecución de herramienta) que registra tiempos, entradas/salidas, \textit{tokens}, atributos y errores.
+
+\item[Task Execution API (Airflow 3).]
+Interfaz HTTP/JSON basada en FastAPI mediante la cual los \textit{workers} de Airflow~3 interactúan con el plano de control (contexto, secretos, XComs, estado), eliminando el acceso directo de las tareas a la base de metadatos.
+
+\item[Task SDK (Airflow 3).]
+Paquete ligero y desacoplado (\pkg{apache-airflow-task-sdk}, importado como \code{airflow.sdk}) que provee las primitivas de autoría (\code{@dag}, \code{@task}, \code{Asset}) y el entorno de ejecución aislado de tareas en Airflow~3.
+
+\item[TaskFlow API.]
+Estilo declarativo moderno de Airflow (\code{@dag}, \code{@task}) sobre funciones Python estándar que automatiza la inferencia de dependencias y el paso de referencias ligeras por XCom.
+
+\item[TaskGroup.]
+Agrupación lógica y visual de tareas relacionadas (\code{@task\_group}) que modulariza DAGs extensos en la interfaz web sin la sobrecarga ni los bloqueos de los antiguos \code{SubDAGs}.
+
+\item[Trace (Traza).]
+Registro jerárquico OpenTelemetry en MLflow~3 que captura de principio a fin una invocación LLM, cadena RAG o agente, agrupando todos sus \textit{spans}, latencias, uso de \textit{tokens} y evaluaciones (\textit{assessments}).
+
+\item[Training-Serving Skew.]
+Divergencia entre el rendimiento observado en entrenamiento y el comportamiento en producción, originada típicamente por discrepancias al calcular \textit{features} entre \textit{batch} y servicio \textit{online} o por cambios distribucionales.
+
+\item[Trigger (Airflow).]
+Corrutina asíncrona (\code{BaseTrigger}) ejecutada en el bucle \code{asyncio} del \textit{Triggerer} que vigila eventos externos con mínima memoria y emite un \code{TriggerEvent} para reanudar la tarea diferida.
+
+\item[Trigger Rule.]
+Regla por tarea (\code{trigger\_rule}) que define qué combinación de estados de sus tareas padre habilita su ejecución (por defecto \code{all\_success}; tras un \textit{branch}, \code{none\_failed\_min\_one\_success}).
+
+\item[Triggerer.]
+Servicio asíncrono de Apache Airflow que aloja cientos o miles de \textit{Triggers} concurrentes en un único proceso \code{asyncio}, escalando esperas largas sin consumir \textit{worker slots}.
+
+\item[XCom (Cross-Communication).]
+Canal de mensajería interna de Airflow para intercambiar pequeñas piezas de metadatos serializables entre tareas de un mismo \textit{DagRun} (IDs, URIs, métricas escalares; jamás DataFrames ni binarios pesados).
+
+\end{description}
+}

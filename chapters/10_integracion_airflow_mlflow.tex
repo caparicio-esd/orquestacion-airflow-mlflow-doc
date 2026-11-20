@@ -1,0 +1,938 @@
+% ============================================================================
+% 10_integracion_airflow_mlflow.tex — Integración End-to-End Airflow + MLflow
+% ============================================================================
+
+\chapter[Integración End-to-End: Airflow y MLflow]{Integración End-to-End: Apache Airflow y MLflow en Producción}\label{chap:integracion}
+
+A lo largo de los capítulos anteriores hemos diseccionado dos plataformas que, aunque nacieron para resolver problemas distintos, constituyen hoy la columna vertebral de la ingeniería moderna de datos e inteligencia artificial. Apache Airflow resuelve el problema de la \textbf{orquestación de flujos heterogéneos}: cuándo se ejecuta cada proceso, en qué orden, con qué credenciales, sobre qué motor de cómputo y cómo se recupera ante fallos o reprocesamientos históricos. MLflow resuelve el problema del \textbf{ciclo de vida científico y operativo de modelos y aplicaciones basadas en LLM}: qué datos, hiperparámetros, \textit{prompts} y dependencias produjeron cada artefacto, cómo se comportó en evaluación y trazabilidad, y qué versión exacta está autorizada para servir tráfico en producción.
+
+Desplegar Airflow sin una plataforma de experimentación y gobierno conduce a pipelines opacos cuyos modelos terminan en buckets sin linaje ni criterios reproducibles de promoción. Inversamente, operar MLflow sin un orquestador robusto relega el reentrenamiento, la detección de deriva y la revalidación de sistemas RAG a ejecuciones manuales o tareas \code{cron} frágiles. Este capítulo integra ambas tecnologías en arquitecturas productivas completas: primero formalizamos los patrones arquitectónicos de acoplamiento limpio; a continuación construimos dos casos prácticos integrales ---un pipeline MLOps tabular con detección de \textit{drift} que evoluciona el ejemplo final del curso, y un pipeline LLMOps/RAG dirigido por \textit{Assets} de Airflow~3 y evaluación automatizada en MLflow~3--- y cerramos con un \textit{stack} unificado en Docker Compose junto a una lista de verificación de producción.
+
+% ============================================================================
+\section[Patrones de integración Airflow--MLflow]{Patrones arquitectónicos de integración Airflow \texorpdfstring{$\leftrightarrow$}{--} MLflow}\label{sec:patrones-integracion}
+% ============================================================================
+
+Integrar Apache Airflow y MLflow con rigor exige respetar una separación estricta entre el \textbf{plano de orquestación} y el \textbf{plano de experimentación, evaluación y registro}. Cuando ambos sistemas invaden competencias ajenas ---por ejemplo, serializando pesos de modelos en XComs o tratando scripts monolíticos de MLflow Projects como sustituto de un planificador distribuido--- aparecen cuellos de botella de memoria, fragilidad operativa y pérdida de trazabilidad.
+
+\subsection{Reparto de responsabilidades entre ambos planos}
+
+La Tabla~\ref{tab:responsabilidades-airflow-mlflow} sintetiza la frontera arquitectónica recomendada: \textbf{Airflow gobierna el flujo de ejecución y la infraestructura externa; MLflow gobierna la semántica científica, la calidad y el catálogo de artefactos de IA}.
+
+\begin{table}[htbp]
+\centering
+\caption{Reparto de responsabilidades entre Apache Airflow y MLflow en producción.}
+\label{tab:responsabilidades-airflow-mlflow}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.9cm} Y Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Dimensión} &
+\textcolor{white}{\sffamily\bfseries Plano de Orquestación (Airflow)} &
+\textcolor{white}{\sffamily\bfseries Plano ML / LLMOps (MLflow 3)} \\
+\midrule
+Disparo y temporalidad &
+Planificación \textit{cron}, intervalos de datos, \textit{backfills}, sensores diferibles y eventos \code{Asset}. &
+Pasivo por diseño: recibe corridas (\textit{runs}), trazas y evaluaciones invocadas desde tareas o servicios. \\
+\rowcolor{TableStripe}
+Conectividad y secretos &
+\textit{Connections}, \textit{Hooks} y \textit{Secrets Backends} (Vault, AWS/GCP/Azure) para bases de datos, S3, APIs y Slack. &
+\textit{AI Gateway} para centralizar claves, cuotas y enrutamiento LLM; credenciales del \textit{Artifact Store}. \\
+Control de flujo &
+Grafos DAG, \code{@task.branch}, \code{TaskGroup}, mapeo dinámico, reintentos, \textit{pools} y alertas operativas. &
+Composición interna de modelos (\code{pyfunc}, \code{ResponsesAgent}) y árboles de \textit{spans} en invocaciones LLM. \\
+\rowcolor{TableStripe}
+Estado y persistencia &
+Estado de \textit{DagRuns}/\textit{TaskInstances} y metadatos ligeros en XCom (referencias, IDs, rutas). &
+Parámetros, métricas históricas, \textit{LoggedModel}, artefactos en S3/MinIO, trazas OTel y evaluaciones. \\
+Gobierno y promoción &
+Ejecución automatizada de \textit{quality gates}, notificaciones y orquestación de despliegues o \textit{rollbacks}. &
+\textit{Model Registry} y \textit{Prompt Registry} con versiones inmutables, \textit{tags} y punteros \textit{Aliases} (\code{@champion}, \code{@production}). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{infobox}[Principio de frontera limpia: referencias en XCom, artefactos en Object Storage, linaje en MLflow]
+Una tarea de Airflow jamás debe serializar DataFrames, tensores, vectores de \textit{embeddings} ni binarios de modelos por XCom. La frontera de datos entre tareas consecutivas se limita a \textbf{identificadores ligeros e inmutables}: un \code{run\_id}, un \code{model\_uri} (\code{runs:/.../model} o \code{models:/nombre@challenger}), un \code{prompt\_uri} (\code{prompts:/asistente@staging}), una ruta \code{ObjectStoragePath} particionada (\code{s3://bucket/.../dt=2026-11-20/}) o un resumen escalar de métricas.
+\end{infobox}
+
+\subsection{Tres patrones de ejecución de tareas ML/LLM desde Airflow}
+
+Una decisión clave es \textbf{dónde se ejecuta el cálculo intensivo}. Instalar \pkg{torch}, \pkg{transformers}, \pkg{xgboost} y \pkg{mlflow} directamente en la imagen de los \textit{workers} de Airflow provoca conflictos de dependencias (\pkg{pydantic}, \pkg{sqlalchemy}, \pkg{numpy}), infla imágenes de varios gigabytes y hace que un desbordamiento de memoria durante un entrenamiento derribe tareas críticas de ETL. En producción se distinguen tres patrones:
+
+\begin{enumerate}
+  \item \textbf{Patrón 1 --- Ligero \textit{in-worker} (\code{@task} con entorno compartido o \code{@task.external\_python}):} corre en el \textit{worker} usando el cliente ligero \pkg{mlflow-skinny}. Apropiado solo para tareas de control: consultar métricas con \code{MlflowClient}, evaluar \textit{quality gates}, promover \textit{aliases}, calcular estadísticas ligeras de \textit{drift} o invocar llamadas ligeras a APIs LLM.
+  \item \textbf{Patrón 2 --- Aislado por contenedor (\code{KubernetesPodOperator} / \code{DockerOperator}):} cada entrenamiento pesado (PyTorch/CUDA con GPU, XGBoost de alta RAM, \textit{embeddings} locales o suites largas de evaluación RAG) se ejecuta en un contenedor efímero a partir de una imagen OCI fijada por \textit{digest} SHA-256. Permite solicitar GPUs (\code{nvidia.com/gpu: 1}) bajo demanda y devolver solo el JSON mínimo (\code{\{\textquotedbl{}run\_id\textquotedbl{}: \textquotedbl{}...\textquotedbl{}, \textquotedbl{}test\_f1\textquotedbl{}: 0.96\}}) vía \code{/airflow/xcom/return.json}.
+  \item \textbf{Patrón 3 --- Delegado a clúster externo:} para entrenamiento distribuido multi-nodo o ETL masivo se delega mediante \code{SparkKubernetesOperator}, \code{DatabricksRunNowOperator} o \code{RayJobOperator}, siempre con \code{deferrable=True} sobre el \textit{Triggerer} para no bloquear \textit{worker slots} mientras el clúster remoto registra métricas directamente en MLflow.
+\end{enumerate}
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa técnica de los tres patrones de ejecución ML/LLM desde Apache Airflow.}
+\label{tab:patrones-ejecucion-ml}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.5cm} C{2.0cm} C{1.7cm} C{1.8cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Patrón} &
+\textcolor{white}{\sffamily\bfseries Aislamiento} &
+\textcolor{white}{\sffamily\bfseries GPU / Escala} &
+\textcolor{white}{\sffamily\bfseries \textit{Cold start}} &
+\textcolor{white}{\sffamily\bfseries Casos de uso óptimos} \\
+\midrule
+1. \textit{In-worker} (\code{@task}) &
+Bajo (\partialmark{} venv) &
+\nomark{} CPU local &
+$<2$~s &
+\textit{Quality gates}, promoción de \textit{aliases}, telemetría ligera, alertas, cálculo de PSI. \\
+\rowcolor{TableStripe}
+2. Contenedor (\code{K8sPodOp}) &
+Total (OCI) &
+\yesmark{} GPU por Pod &
+15--60~s &
+Entrenamiento tabular/DL, HPO con Optuna, evaluación RAG pesada, \textit{embeddings} locales. \\
+3. Clúster externo &
+Total (remoto) &
+\yesmark{} Multi-GPU &
+1--5~min &
+ETL distribuido masivo, \textit{fine-tuning} distribuido de LLMs, \textit{batch scoring} masivo. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Gestión limpia de configuración, credenciales y trazabilidad}
+
+Jamás debe hardcodearse \code{MLFLOW\_TRACKING\_URI = \textquotedbl{}http://mlflow:5000\textquotedbl{}} ni incrustar claves S3 o \code{OPENAI\_API\_KEY} en el nivel superior del DAG (que el \textit{DAG Processor} reparsea cada pocos segundos). El Listado~\ref{lst:helper-mlflow-conn} muestra la resolución segura en tiempo de ejecución desde \textit{Airflow Connections} / \textit{Secrets Backends} y la inyección mediante objetos \code{Secret} en un \code{KubernetesPodOperator} diferible. Asimismo, conviene estampar en cada \textit{run} de MLflow las etiquetas \code{airflow.dag\_id} y \code{airflow.run\_id} para mantener trazabilidad bidireccional.
+
+\begin{lstlisting}[style=python, basicstyle=\ttfamily\scriptsize\color{CodeIdentifier}, caption={Configuración segura de MLflow mediante Airflow Connections y secretos de Kubernetes.}, label={lst:helper-mlflow-conn}]
+import os
+from contextlib import contextmanager
+from typing import Iterator
+import mlflow
+from airflow.hooks.base import BaseHook
+from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
+from airflow.providers.cncf.kubernetes.secret import Secret
+
+@contextmanager
+def configurar_mlflow_desde_conexiones(
+    mlflow_conn_id: str = "mlflow_prod", s3_conn_id: str = "minio_s3"
+) -> Iterator[str]:
+    """Resuelve URI y credenciales en ejecucion desde Airflow Secrets Backend."""
+    ml_conn = BaseHook.get_connection(mlflow_conn_id)
+    s3_conn = BaseHook.get_connection(s3_conn_id)
+    port = f":{ml_conn.port}" if ml_conn.port else ""
+    tracking_uri = f"{ml_conn.schema or 'http'}://{ml_conn.host}{port}"
+
+    keys = ("MLFLOW_TRACKING_URI", "MLFLOW_TRACKING_TOKEN", "MLFLOW_S3_ENDPOINT_URL",
+            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
+    prev = {k: os.environ.get(k) for k in keys}
+    try:
+        os.environ["MLFLOW_TRACKING_URI"] = tracking_uri
+        if ml_conn.password:
+            os.environ["MLFLOW_TRACKING_TOKEN"] = ml_conn.password
+        if s3_conn.login and s3_conn.password:
+            os.environ["AWS_ACCESS_KEY_ID"] = s3_conn.login
+            os.environ["AWS_SECRET_ACCESS_KEY"] = s3_conn.password
+        if endpoint := s3_conn.extra_dejson.get("endpoint_url"):
+            os.environ["MLFLOW_S3_ENDPOINT_URL"] = endpoint
+        mlflow.set_tracking_uri(tracking_uri)
+        yield tracking_uri
+    finally:
+        for k, v in prev.items():
+            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
+# Patron 2: inyeccion de credenciales mediante Kubernetes Secrets + deferrable
+entrenar_gpu_pod = KubernetesPodOperator(
+    task_id="entrenar_modelo_gpu",
+    namespace="mlops-training",
+    image="registry.corp.local/mlops/trainer@sha256:9f86d081884c7d659a2feaa0c55ad015",
+    cmds=["python", "-m", "trainer.run_hpo"],
+    arguments=["--dataset-uri", "{{ ti.xcom_pull(task_ids='validar_datos') }}"],
+    env_vars={"MLFLOW_TRACKING_URI": "https://mlflow.corp.internal"},
+    secrets=[
+        Secret("env", "MLFLOW_TRACKING_TOKEN", "mlops-mlflow-creds", "tracking_token"),
+        Secret("env", None, "mlops-s3-creds"),
+    ],
+    do_xcom_push=True,  # Lee /airflow/xcom/return.json -> {"run_id": "..."}
+    deferrable=True,    # Libera el worker slot durante el entrenamiento GPU
+    is_delete_operator_pod=True,
+)
+\end{lstlisting}
+
+% ============================================================================
+\section[Caso Práctico 1: MLOps Tabular con Drift]{Caso Práctico 1: Pipeline MLOps Tabular Completo con Detección de Drift}\label{sec:caso-mlops-tabular}
+% ============================================================================
+
+Como primer caso productivo evolucionamos el ejemplo final de la presentación docente (Diapositiva~85, \code{retrain\_iris}), un DAG compacto que entrena un clasificador, comprueba un umbral de exactitud y lo promueve a producción. Auditar constructivamente ese prototipo permite distinguir qué simplificaciones son adecuadas para el aula y qué brechas deben cerrarse antes de operar en un clúster real.
+
+\subsection{Análisis crítico constructivo del prototipo \code{retrain\_iris} (Diapositiva 85)}
+
+El prototipo original acierta en cuatro decisiones clave: adopta TaskFlow API (\code{@dag}, \code{@task}), encadena explícitamente \textit{extraer $\rightarrow$ validar $\rightarrow$ entrenar $\rightarrow$ evaluar y promover}, pasa una ruta y un \code{run\_id} por XCom en lugar de DataFrames completos, e incorpora un \textit{quality gate} antes del registro. Sin embargo, pasar a producción requiere resolver cinco brechas críticas, resumidas en la Tabla~\ref{tab:auditoria-slide85}.
+
+\begin{table}[htbp]
+\centering
+\caption{Auditoría de brechas entre el prototipo didáctico (Diapositiva 85) y el diseño de producción.}
+\label{tab:auditoria-slide85}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.7cm} L{5.4cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Aspecto} &
+\textcolor{white}{\sffamily\bfseries Prototipo \texttt{retrain\_iris} (Slide 85)} &
+\textcolor{white}{\sffamily\bfseries Solución de producción (Capítulo 10)} \\
+\midrule
+Almacenamiento intermedio &
+Ruta local \code{/tmp/iris\_snapshot.parquet}, efímera, invisible entre \textit{workers} y no particionada. &
+\code{ObjectStoragePath} sobre S3/MinIO particionado por \code{dt=\{ds\}}, compartido e idempotente. \\
+\rowcolor{TableStripe}
+Métrica y validación &
+Comprueba \code{training\_accuracy\_score} (sobre entrenamiento!) frente a umbral fijo \code{0.90}. &
+División estratificada \textit{train/test}, evaluación \textit{holdout} (\code{test\_f1\_macro}) y contraste \textit{Champion vs. Challenger}. \\
+Gobierno en Registry &
+\code{transition\_model\_version\_stage} con \code{stage=\textquotedbl{}Production\textquotedbl{}} (deprecado / eliminado en MLflow~3). &
+\textit{Aliases} (\code{@challenger} $\rightarrow$ validación $\rightarrow$ \code{@champion} + respaldo \code{@previous\_champion}) y \textit{tags}. \\
+\rowcolor{TableStripe}
+Eficiencia ante estabilidad &
+Reentrena cada semana sin comprobar si la distribución de entrada cambió. &
+Detección de \textit{Data Drift} (PSI) con \code{@task.branch}: solo entrena ante $\mathrm{PSI}_{\max} \ge 0.20$, caducidad o disparo manual. \\
+Calidad, secretos y alertas &
+\code{MLFLOW\_TRACKING\_URI} hardcodeado, validación esbozada y sin notificación de veredicto. &
+Validación contractual con Pandera, credenciales vía \textit{Connections}/\textit{Secrets} y alertas Slack con enlaces a MLflow UI. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{warningbox}[Corrección metodológica crítica: jamás evaluar con \code{training\_accuracy\_score}]
+En la Diapositiva~85, la tarea \code{evaluar\_y\_promover} inspecciona \code{run.data.metrics[\textquotedbl{}training\_accuracy\_score\textquotedbl{}]}, generada por \code{mlflow.sklearn.autolog()} sobre los \textbf{mismos ejemplos usados durante \code{model.fit()}}. Un árbol o \code{RandomForestClassifier} sin límite de profundidad memoriza trivialmente el conjunto de entrenamiento alcanzando \code{1.00} incluso con severo sobreajuste. En producción, el \textit{quality gate} debe evaluarse exclusivamente sobre un conjunto \textit{holdout} estratificado (o temporal) y exigir que el candidato (\code{@challenger}) supere tanto el umbral absoluto como al modelo \code{@champion} vigente sobre exactamente el mismo lote de prueba con un margen mínimo $\Delta_{\min}$.
+\end{warningbox}
+
+Para evitar reentrenamientos innecesarios cuando $P(X)$ es estable, la tarea de vigilancia estadística calcula el \textbf{Population Stability Index (PSI)} por variable $j$ entre la ventana actual $p^{\text{actual}}$ y la distribución de referencia $p^{\text{ref}}$ del entrenamiento del \code{@champion} en $B$ cuantiles fijos:
+\begin{equation}\label{eq:psi-produccion}
+  \mathrm{PSI}_j = \sum_{b=1}^{B} \left(p_{j,b}^{\text{actual}} - p_{j,b}^{\text{ref}}\right) \ln\!\left(\frac{\max(p_{j,b}^{\text{actual}}, \varepsilon)}{\max(p_{j,b}^{\text{ref}}, \varepsilon)}\right), \qquad \varepsilon = 10^{-6}.
+\end{equation}
+Si $\max_j \mathrm{PSI}_j < 0.20$ y el modelo vigente no supera su caducidad máxima (ni se activó \code{forzar\_reentreno}), el \textit{branch} toma la rama ligera de telemetría sin coste de entrenamiento.
+
+\subsection{Arquitectura e implementación del DAG MLOps de producción}
+
+La Figura~\ref{fig:dag-mlops-drift} muestra el grafo completo del pipeline y su integración con PostgreSQL, MinIO/S3, MLflow~3 y Slack. Obsérvese la convergencia final en \code{notificar\_slack} con \code{trigger\_rule=\textquotedbl{}none\_failed\_min\_one\_success\textquotedbl{}}, que permite reportar el resultado de cualquiera de las dos ramas sin enmascarar excepciones reales.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.6cm and 0.65cm]
+  % Fila principal izquierda
+  \node[archbox, text width=2.4cm] (extract) {1. \code{extraer\_pg\_a\_s3}\\{\scriptsize\normalfont PostgresHook $\rightarrow$ S3}};
+  \node[archbox, text width=2.3cm, right=0.55cm of extract] (validate) {2. \code{validar\_datos}\\{\scriptsize\normalfont Contrato Pandera}};
+  \node[amberbox, text width=2.4cm, right=0.55cm of validate] (drift) {3. \code{evaluar\_drift}\\{\scriptsize\normalfont \code{@task.branch} (PSI)}};
+
+  % Rama superior (Sin drift)
+  \node[tealbox, text width=3.5cm, above right=0.65cm and 2.15cm of drift] (noretrain) {4a. \code{registrar\_sin\_reentreno}\\{\scriptsize\normalfont Log telemetría PSI estable}};
+
+  % Rama inferior (Con drift / caducidad)
+  \node[archbox, text width=2.9cm, below right=0.65cm and 2.15cm of drift] (train) {4b. \code{entrenar\_hpo\_mlflow}\\{\scriptsize\normalfont HPO + \code{@challenger}}};
+  \node[archbox, text width=2.9cm, right=0.55cm of train] (eval) {5. \code{evaluar\_champion\_}\\ \code{vs\_challenger}\\{\scriptsize\normalfont Holdout F1 + $\Delta_{\min}$}};
+  \node[tealbox, text width=2.6cm, right=0.55cm of eval] (promote) {6. \code{promover\_alias\_}\\ \code{champion}\\{\scriptsize\normalfont \code{@champion} atómico}};
+
+  % Nodo convergente final (texto blanco nativo en darkbox)
+  \coordinate (slack_anchor) at (promote.east |- drift.center);
+  \node[darkbox, text width=2.5cm, right=0.75cm of slack_anchor] (slack) {7. \texttt{notificar\_slack}\\{\scriptsize\normalfont \texttt{none\_failed\_min\_one}}};
+
+  % Contenedor del DAG
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(extract)(validate)(drift)(noretrain)(train)(eval)(promote)(slack),
+          inner sep=12pt, label={[font=\sffamily\footnotesize\bfseries, text=PrimaryDark]above left:DAG Airflow: \code{mlops\_tabular\_drift\_pipeline} (\code{schedule=\textquotedbl{}@daily\textquotedbl{}})}] (dagbox) {};
+  \end{scope}
+
+  % Infraestructura externa alineada bajo dagbox.south
+  \coordinate (infra_y) at ([yshift=-1.35cm]dagbox.south);
+  \node[dbnode, text width=2.1cm] (pg) at (extract |- infra_y) {PostgreSQL\\{\scriptsize\normalfont Warehouse}};
+  \node[dbnode, text width=2.4cm] (s3) at (validate |- infra_y) {MinIO / S3\\{\scriptsize\normalfont \code{ObjectStoragePath}}};
+  \node[tealbox, text width=5.8cm] (mlflow) at (eval |- infra_y) {MLflow 3 Tracking \& Model Registry\\{\scriptsize\normalfont Runs HPO, Dataset Hash, \code{@challenger} / \code{@champion}}};
+  \node[subbox, text width=2.4cm] (slackext) at (slack |- infra_y) {\textbf{Slack Ops}\\{\scriptsize\normalfont Enlace MLflow UI}};
+
+  % Flechas del DAG
+  \draw[flowarrow] (extract) -- (validate);
+  \draw[flowarrow] (validate) -- (drift);
+  \draw[tealarrow] (drift.north east) |- node[elabel, pos=0.74, above] {$\mathrm{PSI}<0.20$ y vigente} (noretrain.west);
+  \draw[flowarrow] (drift.south east) |- node[elabel, pos=0.74, below] {$\mathrm{PSI}\ge 0.20$ o caducado} (train.west);
+  \draw[flowarrow] (train) -- (eval);
+  \draw[flowarrow] (eval) -- (promote);
+  \draw[tealarrow] (noretrain.east) -| (slack.north);
+  \draw[flowarrow] (promote.east) -| (slack.south);
+
+  % Flechas hacia infraestructura
+  \draw[dashedarrow] (pg.north) -- (extract.south);
+  \draw[dashedarrow] (extract.south east) -- (s3.north west);
+  \draw[dashedarrow] (s3.north) -- (validate.south);
+  \draw[dashedarrow] (s3.east) -- ++(0.65,0) |- (train.south west);
+  \draw[dashedarrow] (train.south) -- (mlflow.north west);
+  \draw[dashedarrow] (eval.south) -- (mlflow.north);
+  \draw[dashedarrow] (promote.south) -- (mlflow.north east);
+  \draw[dashedarrow] (slack.south) -- (slackext.north);
+\end{tikzpicture}%
+}
+\caption{Arquitectura del DAG MLOps tabular con validación contractual, detección de \textit{Data Drift} (PSI), evaluación \textit{Champion vs. Challenger} y promoción atómica por \textit{Aliases} en MLflow.}
+\label{fig:dag-mlops-drift}
+\end{figure}
+
+El Listado~\ref{lst:dag-mlops-produccion} implementa íntegramente este DAG con el Task SDK de Airflow~3 (\code{airflow.sdk}, equivalente a \code{airflow.decorators} en 2.10), \code{PostgresHook}, \code{ObjectStoragePath}, Pandera y \code{MlflowClient}. Cada etapa es idempotente respecto a \code{ds}, y la tarea \code{entrenar\_hpo\_mlflow} puede sustituirse transparentemente por un \code{KubernetesPodOperator} si el volumen de datos exige aceleración GPU.
+
+\begin{lstlisting}[style=python, basicstyle=\ttfamily\scriptsize\color{CodeIdentifier}, caption={DAG de producción \code{mlops\_tabular\_drift\_pipeline}: extracción a S3, validación Pandera, branch por PSI, HPO en MLflow y promoción Champion vs. Challenger por Aliases.}, label={lst:dag-mlops-produccion}]
+from __future__ import annotations
+from datetime import datetime, timedelta
+from typing import Any
+import numpy as np, pandas as pd, pandera.pandas as pa
+from airflow.io.path import ObjectStoragePath
+from airflow.models.param import Param
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.providers.slack.hooks.slack_webhook import SlackWebhookHook
+from airflow.sdk import dag, task  # Airflow 2.10: from airflow.decorators import dag, task
+from airflow.utils.trigger_rule import TriggerRule
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.metrics import f1_score, log_loss
+from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+import mlflow
+from mlflow.models import infer_signature
+from mlflow.tracking import MlflowClient
+from utils.mlflow_conn import configurar_mlflow_desde_conexiones
+
+MODEL_NAME, EXP_NAME = "scoring_clientes_clf", "prod_scoring_clientes"
+S3_BASE = "s3://ml-data-lake/scoring_clientes"
+PSI_MAX_OK, MIN_F1, MIN_DELTA, MAX_AGE_DAYS = 0.20, 0.88, 0.005, 14
+FEATURES = ["antiguedad_meses", "ratio_deuda", "tickets_soporte_90d", "uso_mensual"]
+TARGET = "target"
+
+def _psi(ref: pd.Series, cur: pd.Series, bins: int = 10) -> float:
+    edges = np.unique(np.quantile(ref.dropna(), np.linspace(0.0, 1.0, bins + 1)))
+    if len(edges) < 3:
+        return 0.0
+    edges[0], edges[-1] = -np.inf, np.inf
+    p_ref = np.clip(np.histogram(ref, bins=edges)[0] / max(len(ref), 1), 1e-6, None)
+    p_cur = np.clip(np.histogram(cur, bins=edges)[0] / max(len(cur), 1), 1e-6, None)
+    return float(np.sum((p_cur - p_ref) * np.log(p_cur / p_ref)))
+
+@dag(
+    dag_id="mlops_tabular_drift_pipeline", schedule="@daily",
+    start_date=datetime(2026, 1, 1), catchup=False, max_active_runs=1,
+    default_args={"owner": "mlops-platform", "retries": 2, "retry_delay": timedelta(minutes=5)},
+    params={"forzar_reentreno": Param(False, type="boolean")},
+    tags=["mlops", "tabular", "drift", "mlflow3"],
+)
+def mlops_tabular_drift_pipeline():
+
+    @task
+    def extraer_pg_a_s3(ds: str = "") -> str:
+        pg = PostgresHook(postgres_conn_id="warehouse_pg")
+        sql = """SELECT antiguedad_meses, ratio_deuda, tickets_soporte_90d, uso_mensual, target
+                 FROM analytics.features_scoring_gold
+                 WHERE fecha_corte <= %s AND fecha_corte > (%s::date - INTERVAL '180 days')"""
+        df = pg.get_pandas_df(sql, parameters=(ds, ds))
+        if df.empty:
+            raise ValueError(f"Sin datos para ds={ds}")
+        dest = ObjectStoragePath(f"{S3_BASE}/raw/dt={ds}/snapshot.parquet", conn_id="minio_s3")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("wb") as fh:
+            df.to_parquet(fh, index=False)
+        return str(dest)
+
+    @task
+    def validar_datos(snapshot_uri: str, ds: str = "") -> str:
+        with ObjectStoragePath(snapshot_uri, conn_id="minio_s3").open("rb") as fh:
+            df = pd.read_parquet(fh)
+        schema = pa.DataFrameSchema(
+            {
+                "antiguedad_meses": pa.Column(float, pa.Check.in_range(0, 600), nullable=False),
+                "ratio_deuda": pa.Column(float, pa.Check.in_range(0.0, 5.0), nullable=False),
+                "tickets_soporte_90d": pa.Column(int, pa.Check.ge(0), nullable=False),
+                "uso_mensual": pa.Column(float, pa.Check.ge(0.0), nullable=False),
+                "target": pa.Column(int, pa.Check.isin([0, 1]), nullable=False),
+            },
+            checks=[pa.Check(lambda d: len(d) >= 1000, error="Minimo 1000 filas")], strict=True,
+        )
+        df_ok = schema.validate(df, lazy=True)
+        out = ObjectStoragePath(f"{S3_BASE}/validated/dt={ds}/dataset.parquet", conn_id="minio_s3")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("wb") as fh:
+            df_ok.to_parquet(fh, index=False)
+        return str(out)
+
+    @task.branch
+    def evaluar_drift(validated_uri: str, ds: str = "", **ctx: Any) -> str:
+        forzar = bool(ctx["params"].get("forzar_reentreno", False))
+        with ObjectStoragePath(validated_uri, conn_id="minio_s3").open("rb") as fh:
+            df_cur = pd.read_parquet(fh)
+        with configurar_mlflow_desde_conexiones():
+            client = MlflowClient()
+            try:
+                champ = client.get_model_version_by_alias(MODEL_NAME, "champion")
+            except Exception:
+                ctx["ti"].xcom_push(key="drift_report", value={"motivo": "cold_start", "psi_max": 1.0})
+                return "entrenar_hpo_mlflow"
+            age_days = (datetime.fromisoformat(ds) - datetime.fromtimestamp(champ.creation_timestamp / 1000.0)).days
+            psi_map = {}
+            if ref_uri := champ.tags.get("data_snapshot_uri"):
+                with ObjectStoragePath(ref_uri, conn_id="minio_s3").open("rb") as fh:
+                    df_ref = pd.read_parquet(fh)
+                psi_map = {c: round(_psi(df_ref[c], df_cur[c]), 4) for c in FEATURES}
+            psi_max = max(psi_map.values(), default=0.0)
+            ctx["ti"].xcom_push(key="drift_report", value={"psi_max": psi_max, "age_days": age_days})
+            return "entrenar_hpo_mlflow" if (forzar or psi_max >= PSI_MAX_OK or age_days >= MAX_AGE_DAYS) else "registrar_sin_reentreno"
+
+    @task
+    def registrar_sin_reentreno(ds: str = "", **ctx: Any) -> dict[str, Any]:
+        rep = ctx["ti"].xcom_pull(task_ids="evaluar_drift", key="drift_report") or {}
+        with configurar_mlflow_desde_conexiones() as uri:
+            mlflow.set_experiment(EXP_NAME)
+            with mlflow.start_run(run_name=f"drift_check_{ds}") as run:
+                mlflow.set_tags({"run_type": "drift_only", "airflow.run_id": ctx["run_id"]})
+                mlflow.log_metric("psi_max", float(rep.get("psi_max", 0.0)))
+                return {"estado": "estable", "psi_max": rep.get("psi_max", 0.0),
+                        "url": f"{uri}/#/experiments/{run.info.experiment_id}/runs/{run.info.run_id}"}
+
+    @task
+    def entrenar_hpo_mlflow(validated_uri: str, ds: str = "", **ctx: Any) -> dict[str, Any]:
+        with ObjectStoragePath(validated_uri, conn_id="minio_s3").open("rb") as fh:
+            df = pd.read_parquet(fh)
+        X_tr, X_te, y_tr, y_te = train_test_split(df[FEATURES], df[TARGET], test_size=0.20, stratify=df[TARGET], random_state=42)
+        holdout = ObjectStoragePath(f"{S3_BASE}/holdout/dt={ds}/test.parquet", conn_id="minio_s3")
+        holdout.parent.mkdir(parents=True, exist_ok=True)
+        with holdout.open("wb") as fh:
+            pd.concat([X_te, y_te], axis=1).to_parquet(fh, index=False)
+
+        candidatos = [
+            ("rf_d8", RandomForestClassifier(n_estimators=200, max_depth=8, random_state=42)),
+            ("rf_d14", RandomForestClassifier(n_estimators=300, max_depth=14, random_state=42)),
+            ("gb_lr05", GradientBoostingClassifier(n_estimators=180, learning_rate=0.05, random_state=42)),
+        ]
+        with configurar_mlflow_desde_conexiones() as uri:
+            mlflow.set_experiment(EXP_NAME)
+            client, cv = MlflowClient(), StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+            best_cv, best_est, best_name = -1.0, None, ""
+            with mlflow.start_run(run_name=f"retrain_hpo_{ds}") as parent:
+                mlflow.log_input(mlflow.data.from_pandas(df, source=validated_uri, targets=TARGET), context="training")
+                mlflow.set_tags({"airflow.dag_id": ctx["dag"].dag_id, "airflow.run_id": ctx["run_id"]})
+                for name, est in candidatos:
+                    with mlflow.start_run(run_name=name, nested=True):
+                        score = float(np.mean(cross_val_score(est, X_tr, y_tr, cv=cv, scoring="f1_macro")))
+                        mlflow.log_params(est.get_params())
+                        mlflow.log_metric("cv_f1_macro", score)
+                        if score > best_cv:
+                            best_cv, best_est, best_name = score, est, name
+                assert best_est is not None
+                best_est.fit(X_tr, y_tr)
+                test_f1 = float(f1_score(y_te, best_est.predict(X_te), average="macro"))
+                test_ll = float(log_loss(y_te, best_est.predict_proba(X_te)))
+                mlflow.log_param("selected_candidate", best_name)
+                mlflow.log_metrics({"cv_f1_macro": best_cv, "test_f1_macro": test_f1, "test_log_loss": test_ll})
+                info = mlflow.sklearn.log_model(best_est, name="model", signature=infer_signature(X_tr, best_est.predict(X_tr)), input_example=X_tr.iloc[:3])
+                reg = mlflow.register_model(model_uri=info.model_uri, name=MODEL_NAME)
+                client.set_registered_model_alias(MODEL_NAME, "challenger", reg.version)
+                client.set_model_version_tag(MODEL_NAME, reg.version, "data_snapshot_uri", validated_uri)
+                return {"run_id": parent.info.run_id, "exp_id": parent.info.experiment_id,
+                        "challenger_ver": str(reg.version), "holdout_uri": str(holdout), "uri": uri}
+
+    @task
+    def evaluar_champion_vs_challenger(meta: dict[str, Any]) -> dict[str, Any]:
+        with ObjectStoragePath(meta["holdout_uri"], conn_id="minio_s3").open("rb") as fh:
+            df_te = pd.read_parquet(fh)
+        X_te, y_te = df_te[FEATURES], df_te[TARGET]
+        with configurar_mlflow_desde_conexiones():
+            client = MlflowClient()
+            chall_f1 = float(f1_score(y_te, mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@challenger").predict(X_te), average="macro"))
+            champ_f1, champ_ver = 0.0, None
+            try:
+                champ_ver = str(client.get_model_version_by_alias(MODEL_NAME, "champion").version)
+                champ_f1 = float(f1_score(y_te, mlflow.sklearn.load_model(f"models:/{MODEL_NAME}@champion").predict(X_te), average="macro"))
+            except Exception:
+                pass
+            ok = (chall_f1 >= MIN_F1) and (champ_ver is None or chall_f1 >= champ_f1 + MIN_DELTA)
+            client.set_model_version_tag(MODEL_NAME, meta["challenger_ver"], "validation_status", "passed" if ok else "rejected")
+            return {**meta, "ok": ok, "chall_f1": round(chall_f1, 4), "champ_f1": round(champ_f1, 4), "prev_champ": champ_ver}
+
+    @task
+    def promover_alias_champion(res: dict[str, Any]) -> dict[str, Any]:
+        url = f"{res['uri']}/#/experiments/{res['exp_id']}/runs/{res['run_id']}"
+        if not res["ok"]:
+            return {"estado": "rechazado", "chall_f1": res["chall_f1"], "champ_f1": res["champ_f1"], "url": url}
+        with configurar_mlflow_desde_conexiones():
+            client = MlflowClient()
+            if res["prev_champ"]:
+                client.set_registered_model_alias(MODEL_NAME, "previous_champion", res["prev_champ"])
+            client.set_registered_model_alias(MODEL_NAME, "champion", res["challenger_ver"])
+            return {"estado": "promovido", "version": res["challenger_ver"], "chall_f1": res["chall_f1"], "url": url}
+
+    @task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    def notificar_slack(ds: str = "", **ctx: Any) -> None:
+        ti = ctx["ti"]
+        res = ti.xcom_pull(task_ids="promover_alias_champion") or ti.xcom_pull(task_ids="registrar_sin_reentreno") or {}
+        SlackWebhookHook(slack_webhook_conn_id="slack_mlops_alerts").send(
+            text=f"*[MLOps Tabular]* `{ds}` | `{MODEL_NAME}` -> `{res.get('estado')}` | {res}"
+        )
+
+    raw = extraer_pg_a_s3()
+    val = validar_datos(raw)
+    branch = evaluar_drift(val)
+    estable = registrar_sin_reentreno()
+    trained = entrenar_hpo_mlflow(val)
+    eval_res = evaluar_champion_vs_challenger(trained)
+    prom = promover_alias_champion(eval_res)
+    branch >> [estable, trained]
+    [estable, prom] >> notificar_slack()
+
+mlops_tabular_drift_pipeline()
+\end{lstlisting}
+
+% ============================================================================
+\section[Caso Práctico 2: LLMOps y RAG con Assets]{Caso Práctico 2: Pipeline LLMOps y RAG Automatizado con Airflow 3 Assets y MLflow 3}\label{sec:caso-llmops-rag}
+% ============================================================================
+
+El reto operativo dominante en 2025--2026 es gobernar con idéntico rigor asistentes corporativos basados en \textbf{RAG (\textit{Retrieval-Augmented Generation})} y agentes con herramientas. En estos sistemas la degradación surge de dos ejes independientes: (1) la \textbf{mutación diaria del corpus documental} (Confluence, PDFs, S3) que modifica el índice vectorial, y (2) la \textbf{evolución de plantillas de \textit{prompts} y modelos fundacionales} servidos tras el \textit{AI Gateway}.
+
+\begin{modernbox}[Desacoplamiento orientado a datos: Airflow 3 Assets + MLflow 3 GenAI]
+\badge[TealAccent]{Airflow 3} \badge[PrimaryAccent]{MLflow 3} Dividimos el sistema en \textbf{dos DAGs desacoplados unidos por un \code{Asset}} (\code{Asset(\textquotedbl{}s3://kb-prod/corpus-indexado\textquotedbl{})}). El DAG~1 mantiene actualizado el índice vectorial de forma idempotente y publica metadatos del lote en el evento del \textit{Asset}. El DAG~2 se dispara automáticamente al actualizarse el \textit{Asset} ---o bajo demanda desde CI/CD al registrar un nuevo \textit{prompt} \code{@staging}--- y ejecuta \code{mlflow.genai.evaluate()} con trazas OpenTelemetry sobre el \textit{Golden Dataset}: si supera todos los \textit{quality gates}, promociona el alias \code{@production} en el \textit{Prompt Registry}; si detecta regresión, bloquea el despliegue y alerta por Slack con el enlace directo a las trazas fallidas en MLflow UI.
+\end{modernbox}
+
+\subsection{Arquitectura LLMOps/RAG de extremo a extremo}
+
+La Figura~\ref{fig:arquitectura-llmops-rag} ilustra la interacción completa entre ambos DAGs, el evento \code{Asset}, la base de datos vectorial (\pkg{pgvector}/Qdrant), el \textit{MLflow AI Gateway} y la plataforma MLflow~3. El circuito de validación verifica cuatro dimensiones ortogonales: \code{RetrievalGroundedness} (fidelidad frente a alucinaciones), \code{Correctness} (exactitud respecto al \textit{Golden Dataset}), \code{Safety} (tolerancia cero al 100\,\%) y un \code{@scorer} determinista de coste máximo por consulta extraído de los \textit{spans} OpenTelemetry de cada traza.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.6cm and 0.75cm]
+  % FILA 1: DAG 1 (Ingesta) + Asset a la derecha
+  \node[archbox, text width=2.9cm] (d1_ing) {1. \code{extraer\_docs}\\{\scriptsize\normalfont Confluence / S3 (\code{ds})}};
+  \node[archbox, text width=3.0cm, right=0.75cm of d1_ing] (d1_emb) {2. \code{chunk\_y\_embeddings}\\{\scriptsize\normalfont Lotes vía AI Gateway}};
+  \node[archbox, text width=3.1cm, right=0.75cm of d1_emb] (d1_ups) {3. \code{upsert\_vector\_store}\\{\scriptsize\normalfont Idempotente + \code{outlets}}};
+
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(d1_ing)(d1_emb)(d1_ups), inner sep=11pt,
+          label={[font=\sffamily\footnotesize\bfseries, text=PrimaryDark]above left:DAG 1: \code{ingesta\_rag\_corpus} (\code{schedule=\textquotedbl{}@daily\textquotedbl{}})}] (dag1) {};
+  \end{scope}
+
+  \node[tealbox, text width=3.6cm, right=1.15cm of d1_ups, fill=TealAccent!15, line width=1.2pt] (asset) {Airflow 3 \code{Asset}\\{\scriptsize\normalfont \code{s3://kb-prod/corpus-indexado}}\\ {\scriptsize\normalfont Evento + metadatos versión}};
+
+  % FILA 2: DAG 2 (Evaluacion y Promocion) con canal limpio de separacion
+  \node[archbox, text width=3.3cm, below=3.85cm of d1_ing] (d2_eval) {1. \code{ejecutar\_eval\_genai}\\{\scriptsize\normalfont \code{mlflow.genai.evaluate()} + Traces}};
+  \node[amberbox, text width=3.0cm, right=0.8cm of d2_eval] (d2_gate) {2. \code{verificar\_gates}\\{\scriptsize\normalfont Grounded, Correct, Safety, \$}};
+  \node[tealbox, text width=3.6cm, above right=0.22cm and 1.3cm of d2_gate] (d2_prom) {3a. \code{promover\_prompt\_prod}\\{\scriptsize\normalfont Alias \code{@production} en Registry}};
+  \node[darkbox, text width=3.6cm, below right=0.22cm and 1.3cm of d2_gate, fill=CrimsonAccent, draw=CrimsonAccent] (d2_alert) {3b. \texttt{abortar\_y\_alertar\_slack}\\{\scriptsize\normalfont Bloqueo + enlace trazas fallidas}};
+
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(d2_eval)(d2_gate)(d2_prom)(d2_alert), inner sep=11pt,
+          label={[font=\sffamily\footnotesize\bfseries, text=PrimaryDark, anchor=south east]north east:DAG 2: \code{evaluacion\_y\_promocion\_llm} (\code{schedule=[CORPUS\_ASSET]})}] (dag2) {};
+  \end{scope}
+
+  % FILA 3: Infraestructura compartida bajo dag2.south
+  \coordinate (infra_row) at ([yshift=-1.45cm]dag2.south);
+  \node[dbnode, text width=2.7cm] (vectordb) at ([xshift=1.4cm]dag2.west |- infra_row) {Vector DB\\{\scriptsize\normalfont pgvector / Qdrant}};
+  \node[tealbox, text width=3.8cm, right=0.8cm of vectordb] (gateway) {MLflow AI Gateway\\{\scriptsize\normalfont OpenAI / Anthropic / vLLM\\Claves y límites de gasto}};
+  \node[archbox, text width=4.8cm, right=0.8cm of gateway] (mlflow3) {MLflow 3 GenAI Platform\\{\scriptsize\normalfont Prompt Registry (\code{@staging}/\code{@production})\\OTel Tracing + Golden Dataset}};
+  \node[subbox, text width=2.5cm, right=0.8cm of mlflow3] (slack2) {\textbf{Slack LLMOps}\\{\scriptsize\normalfont URL directa a trazas}};
+
+  % Flechas DAG 1 -> Asset -> DAG 2 (dos pistas horizontales separadas sin cruces)
+  \draw[flowarrow] (d1_ing) -- (d1_emb);
+  \draw[flowarrow] (d1_emb) -- (d1_ups);
+  \draw[tealarrow, line width=1.25pt] (d1_ups) -- node[elabel, above] {emite} (asset);
+  \draw[tealarrow, line width=1.25pt] (asset.south) -- ++(0,-0.95) -| node[elabel, pos=0.24, above] {dispara automáticamente DAG 2} (d2_eval.north);
+
+  % Flechas internas DAG 2
+  \draw[flowarrow] (d2_eval) -- (d2_gate);
+  \draw[tealarrow] (d2_gate.north east) |- node[elabel, pos=0.72, above] {Todos OK} (d2_prom.west);
+  \draw[flowarrow, color=CrimsonAccent] (d2_gate.south east) |- node[elabel, pos=0.78, below] {Regresión} (d2_alert.west);
+
+  % Interacciones con infraestructura (pista superior dedicada para d1_ups -> vectordb)
+  \draw[dashedarrow] (d1_ups.south) -- ++(0,-0.42) -| ([xshift=-0.55cm]dag2.west) |- (vectordb.west);
+  \draw[dashedarrow] (d2_eval.south west) -- ++(0,-0.45) -| (vectordb.north);
+  \draw[dashedarrow] (d2_eval.south) -- ++(0,-0.55) -| (gateway.north);
+  \draw[dashedarrow] (d2_eval.south east) -- ++(0,-0.45) -| ([xshift=0.35cm]mlflow3.north west);
+  \draw[dashedarrow] (d2_prom.east) -- ++(0.45,0) |- ([yshift=0.1cm]mlflow3.east);
+  \draw[dashedarrow] (d2_alert.south) -- ++(0,-0.45) -| (slack2.north);
+\end{tikzpicture}%
+}
+\caption{Arquitectura LLMOps/RAG desacoplada mediante \textit{Assets} de Airflow~3, base de datos vectorial, MLflow~3 (Prompt Registry, Tracing y Evaluación LLM-as-a-Judge) y AI Gateway.}
+\label{fig:arquitectura-llmops-rag}
+\end{figure}
+
+\subsection{Implementación de los DAGs desacoplados con Airflow 3 y MLflow 3}
+
+Los Listados~\ref{lst:dag-llmops-ingesta} y~\ref{lst:dag-llmops-eval} presentan la implementación completa de ambos DAGs empleando \code{airflow.sdk} y \code{mlflow.genai}. Nótese cómo la promoción de \code{@production} surte efecto inmediato sobre las aplicaciones que cargan \code{prompts:/asistente\_corporativo\_rag@production} sin redesplegar código, mientras que cualquier regresión lanza una \code{RuntimeError} tras publicar el enlace directo a las trazas fallidas en MLflow UI.
+
+\begin{lstlisting}[style=python, basicstyle=\ttfamily\scriptsize\color{CodeIdentifier}, caption={DAG 1 (\code{ingesta\_rag\_corpus}): ingesta incremental, \textit{embeddings} y \textit{upsert} idempotente en \code{pgvector} emitiendo un \code{Asset} de Airflow~3.}, label={lst:dag-llmops-ingesta}]
+from __future__ import annotations
+import hashlib, json
+from datetime import datetime, timedelta
+from typing import Any
+from airflow.hooks.base import BaseHook
+from airflow.io.path import ObjectStoragePath
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.sdk import Asset, dag, task
+from openai import OpenAI
+
+CORPUS_ASSET = Asset("s3://kb-prod/corpus-indexado")
+KB_RAW_PREFIX, EMBEDDING_ROUTE = "s3://kb-prod/raw-docs", "corp-embeddings-v3"
+
+def _trocear(texto: str, size: int = 800, overlap: int = 120) -> list[str]:
+    chunks, ini = [], 0
+    while ini < len(texto):
+        fin = min(ini + size, len(texto))
+        chunks.append(texto[ini:fin].strip())
+        if fin == len(texto):
+            break
+        ini = max(fin - overlap, ini + 1)
+    return [c for c in chunks if c]
+
+@dag(
+    dag_id="ingesta_rag_corpus", schedule="@daily", start_date=datetime(2026, 1, 1),
+    catchup=False, max_active_runs=1,
+    default_args={"owner": "llmops-platform", "retries": 2, "retry_delay": timedelta(minutes=3)},
+    tags=["llmops", "rag", "ingestion", "airflow3"],
+)
+def ingesta_rag_corpus():
+
+    @task
+    def extraer_docs(ds: str = "") -> str:
+        src = ObjectStoragePath(f"{KB_RAW_PREFIX}/dt={ds}", conn_id="minio_s3")
+        docs = []
+        if src.exists():
+            for f in src.iterdir():
+                if f.suffix in (".md", ".txt"):
+                    txt = f.read_text(encoding="utf-8")
+                    docs.append({"doc_id": f.stem, "uri": str(f),
+                                 "sha256": hashlib.sha256(txt.encode()).hexdigest(), "text": txt})
+        out = ObjectStoragePath(f"s3://kb-prod/staging/dt={ds}/docs.json", conn_id="minio_s3")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(docs, ensure_ascii=False), encoding="utf-8")
+        return str(out)
+
+    @task
+    def chunk_y_embeddings(manifest_uri: str, ds: str = "") -> str:
+        docs = json.loads(ObjectStoragePath(manifest_uri, conn_id="minio_s3").read_text(encoding="utf-8"))
+        gw = BaseHook.get_connection("mlflow_ai_gateway")
+        client = OpenAI(base_url=f"{gw.schema or 'http'}://{gw.host}:{gw.port}/v1", api_key=gw.password or "gw")
+        rows: list[dict[str, Any]] = []
+        for doc in docs:
+            chunks = _trocear(doc["text"])
+            if not chunks:
+                continue
+            embs = client.embeddings.create(model=EMBEDDING_ROUTE, input=chunks).data
+            for i, (txt, emb) in enumerate(zip(chunks, embs)):
+                rows.append({"chunk_id": f"{doc['doc_id']}#{i:04d}", "doc_id": doc["doc_id"],
+                             "sha256": doc["sha256"], "uri": doc["uri"], "content": txt, "emb": emb.embedding})
+        out = ObjectStoragePath(f"s3://kb-prod/staging/dt={ds}/vectors.json", conn_id="minio_s3")
+        out.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        return str(out)
+
+    @task(outlets=[CORPUS_ASSET])
+    def upsert_vector_store(vectors_uri: str, ds: str = "", **ctx: Any) -> dict[str, Any]:
+        rows = json.loads(ObjectStoragePath(vectors_uri, conn_id="minio_s3").read_text(encoding="utf-8"))
+        pg, doc_ids = PostgresHook(postgres_conn_id="rag_pgvector"), sorted({r["doc_id"] for r in rows})
+        with pg.get_conn() as conn, conn.cursor() as cur:
+            if doc_ids:
+                cur.execute("DELETE FROM rag_chunks WHERE doc_id = ANY(%s)", (doc_ids,))
+            for r in rows:
+                cur.execute(
+                    """INSERT INTO rag_chunks (chunk_id, doc_id, doc_sha256, source_uri, content, embedding, updated_ds)
+                       VALUES (%s, %s, %s, %s, %s, %s::vector, %s)
+                       ON CONFLICT (chunk_id) DO UPDATE SET
+                           doc_sha256 = EXCLUDED.doc_sha256, content = EXCLUDED.content,
+                           embedding = EXCLUDED.embedding, updated_ds = EXCLUDED.updated_ds""",
+                    (r["chunk_id"], r["doc_id"], r["sha256"], r["uri"], r["content"], str(r["emb"]), ds),
+                )
+            conn.commit()
+        meta = {"corpus_ds": ds, "docs_actualizados": len(doc_ids), "chunks": len(rows)}
+        ctx["outlet_events"][CORPUS_ASSET].extra = meta
+        return meta
+
+    upsert_vector_store(chunk_y_embeddings(extraer_docs()))
+
+ingesta_rag_corpus()
+\end{lstlisting}
+
+\begin{lstlisting}[style=python, basicstyle=\ttfamily\scriptsize\color{CodeIdentifier}, caption={DAG 2 (\code{evaluacion\_y\_promocion\_llm}): disparado por \code{Asset}, ejecuta \code{mlflow.genai.evaluate()}, valida \textit{quality gates} y promociona o alerta con enlace directo a trazas.}, label={lst:dag-llmops-eval}]
+from __future__ import annotations
+import json
+from datetime import datetime, timedelta
+from typing import Any
+from airflow.hooks.base import BaseHook
+from airflow.io.path import ObjectStoragePath
+from airflow.models.param import Param
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.providers.slack.hooks.slack_webhook import SlackWebhookHook
+from airflow.sdk import Asset, dag, task
+from openai import OpenAI
+import mlflow
+from mlflow.entities import Feedback, SpanType, Trace
+from mlflow.genai.scorers import Correctness, RetrievalGroundedness, Safety, scorer
+from utils.mlflow_conn import configurar_mlflow_desde_conexiones
+
+CORPUS_ASSET = Asset("s3://kb-prod/corpus-indexado")
+PROMPT_NAME, EVAL_EXP = "asistente_corporativo_rag", "llmops_rag_quality_gates"
+GOLDEN_URI = "s3://kb-prod/eval/golden_dataset_v4.json"
+CHAT_ROUTE, EMB_ROUTE = "corp-chat-prod", "corp-embeddings-v3"
+MIN_GROUND, MIN_CORRECT, MIN_SAFETY, MAX_USD = 0.90, 0.85, 1.00, 0.015
+
+@scorer
+def coste_maximo_ok(trace: Trace) -> Feedback:
+    """Verifica el presupuesto por consulta leyendo tokens de spans OpenTelemetry."""
+    in_tok = out_tok = 0
+    for sp in trace.search_spans(span_type=SpanType.CHAT_MODEL):
+        u = sp.get_attribute("mlflow.chat.tokenUsage") or {}
+        in_tok += int(u.get("input_tokens", 0))
+        out_tok += int(u.get("output_tokens", 0))
+    usd = (in_tok * 2.5 + out_tok * 10.0) / 1_000_000.0
+    return Feedback(name="coste_maximo_ok", value=(usd <= MAX_USD),
+                    rationale=f"Coste ${usd:.5f} (in={in_tok}, out={out_tok})")
+
+@dag(
+    dag_id="evaluacion_y_promocion_llm", schedule=[CORPUS_ASSET],
+    start_date=datetime(2026, 1, 1), catchup=False, max_active_runs=1,
+    default_args={"owner": "llmops-platform", "retries": 1, "retry_delay": timedelta(minutes=2)},
+    params={"candidate_alias": Param("staging", type="string")},
+    tags=["llmops", "rag", "mlflow3", "genai-eval"],
+)
+def evaluacion_y_promocion_llm():
+
+    @task
+    def ejecutar_eval_genai(**ctx: Any) -> dict[str, Any]:
+        alias = ctx["params"]["candidate_alias"]
+        eval_data = json.loads(ObjectStoragePath(GOLDEN_URI, conn_id="minio_s3").read_text(encoding="utf-8"))
+        gw = BaseHook.get_connection("mlflow_ai_gateway")
+        llm = OpenAI(base_url=f"{gw.schema or 'http'}://{gw.host}:{gw.port}/v1", api_key=gw.password or "gw")
+        pg = PostgresHook(postgres_conn_id="rag_pgvector")
+
+        with configurar_mlflow_desde_conexiones() as uri:
+            mlflow.set_experiment(EVAL_EXP)
+            mlflow.openai.autolog()
+            prompt = mlflow.genai.load_prompt(f"prompts:/{PROMPT_NAME}@{alias}")
+
+            @mlflow.trace(span_type=SpanType.RETRIEVER, name="pgvector_retrieve")
+            def recuperar(q: str, k: int = 4) -> list[str]:
+                emb = llm.embeddings.create(model=EMB_ROUTE, input=q).data[0].embedding
+                with pg.get_conn() as conn, conn.cursor() as cur:
+                    cur.execute("SELECT content FROM rag_chunks ORDER BY embedding <=> %s::vector LIMIT %s", (str(emb), k))
+                    return [r[0] for r in cur.fetchall()]
+
+            @mlflow.trace(span_type=SpanType.CHAIN, name="rag_predict")
+            def responder_rag(question: str) -> str:
+                contexto = "\n---\n".join(recuperar(question))
+                resp = llm.chat.completions.create(
+                    model=CHAT_ROUTE, temperature=0.0,
+                    messages=[{"role": "user", "content": prompt.format(context=contexto, question=question)}],
+                )
+                return resp.choices[0].message.content or ""
+
+            evts = ctx.get("triggering_asset_events", {}).get(CORPUS_ASSET, [])
+            corpus_ds = str(evts[-1].extra.get("corpus_ds", "manual")) if evts else "manual"
+            with mlflow.start_run(run_name=f"eval_prompt_v{prompt.version}") as run:
+                mlflow.set_tags({"prompt_name": PROMPT_NAME, "prompt_version": str(prompt.version),
+                                 "corpus_ds": corpus_ds, "airflow.run_id": ctx["run_id"]})
+                res = mlflow.genai.evaluate(
+                    data=eval_data, predict_fn=responder_rag,
+                    scorers=[RetrievalGroundedness(), Correctness(), Safety(), coste_maximo_ok],
+                )
+                return {"run_id": run.info.run_id, "exp_id": run.info.experiment_id,
+                        "prompt_ver": int(prompt.version), "corpus_ds": corpus_ds, "uri": uri,
+                        "metrics": {k: float(v) for k, v in res.metrics.items()}}
+
+    @task.branch
+    def verificar_gates(summary: dict[str, Any], **ctx: Any) -> str:
+        m, fallos = summary["metrics"], []
+        if m.get("retrieval_groundedness/mean", 0.0) < MIN_GROUND:
+            fallos.append(f"Groundedness {m.get('retrieval_groundedness/mean', 0.0):.3f} < {MIN_GROUND}")
+        if m.get("correctness/mean", 0.0) < MIN_CORRECT:
+            fallos.append(f"Correctness {m.get('correctness/mean', 0.0):.3f} < {MIN_CORRECT}")
+        if m.get("safety/mean", 0.0) < MIN_SAFETY:
+            fallos.append(f"Safety {m.get('safety/mean', 0.0):.3f} < {MIN_SAFETY}")
+        if m.get("coste_maximo_ok/mean", 0.0) < 0.95:
+            fallos.append(f"Coste pass_rate {m.get('coste_maximo_ok/mean', 0.0):.3f} < 0.95")
+        ctx["ti"].xcom_push(key="gate_failures", value=fallos)
+        return "promover_prompt_prod" if not fallos else "abortar_y_alertar_slack"
+
+    @task
+    def promover_prompt_prod(summary: dict[str, Any]) -> None:
+        with configurar_mlflow_desde_conexiones():
+            mlflow.genai.set_prompt_alias(name=PROMPT_NAME, alias="production", version=summary["prompt_ver"])
+        url = f"{summary['uri']}/#/experiments/{summary['exp_id']}/runs/{summary['run_id']}/traces"
+        SlackWebhookHook(slack_webhook_conn_id="slack_llmops_alerts").send(
+            text=f"*[LLMOps RAG]* `{PROMPT_NAME}` v{summary['prompt_ver']} -> `@production` (corpus `{summary['corpus_ds']}`). Trazas: {url}"
+        )
+
+    @task
+    def abortar_y_alertar_slack(summary: dict[str, Any], **ctx: Any) -> None:
+        fallos = ctx["ti"].xcom_pull(task_ids="verificar_gates", key="gate_failures") or []
+        url = f"{summary['uri']}/#/experiments/{summary['exp_id']}/runs/{summary['run_id']}/traces"
+        SlackWebhookHook(slack_webhook_conn_id="slack_llmops_alerts").send(
+            text=f"*[LLMOps RAG - REGRESION]* Bloqueado `{PROMPT_NAME}` v{summary['prompt_ver']}: {fallos}\nTrazas fallidas: {url}"
+        )
+        raise RuntimeError(f"Quality gates fallidos en evaluacion LLM: {fallos}")
+
+    res = ejecutar_eval_genai()
+    verificar_gates(res) >> [promover_prompt_prod(res), abortar_y_alertar_slack(res)]
+
+evaluacion_y_promocion_llm()
+\end{lstlisting}
+
+% ============================================================================
+\section[Stack Docker Compose y Checklist]{Stack de Referencia Unificado (Docker Compose) y Checklist de Producción}\label{sec:stack-referencia}
+% ============================================================================
+
+Para pruebas de integración reproducibles y transición ordenada hacia Kubernetes, el Listado~\ref{lst:docker-compose-stack} unifica cuatro principios: (1) bases PostgreSQL aisladas (\code{airflow}, \code{mlflow} y \code{warehouse} con \pkg{pgvector}), (2) MinIO como almacén S3 con buckets separados (\code{mlflow-artifacts}, \code{ml-data-lake}, \code{kb-prod}), (3) MLflow~3 en modo \code{--serve-artifacts} y (4) inyección declarativa de \textit{Connections} de Airflow. En Kubernetes, cada bloque se sustituye por su equivalente gestionado (\textit{Helm Chart} de Airflow con \code{KubernetesExecutor}, RDS/Cloud SQL con PITR, S3/GCS con IAM federado e \textit{Ingress} TLS/OIDC).
+
+\begin{lstlisting}[style=yaml, basicstyle=\ttfamily\scriptsize\color{CodeIdentifier}, caption={Stack de referencia \code{docker-compose.yml} integrando PostgreSQL/pgvector, MinIO, MLflow 3 y Apache Airflow 3.}, label={lst:docker-compose-stack}]
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.0.1-python3.12
+  networks: [mlops-net]
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AF_DB_PASS}@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__API__BASE_URL: http://airflow-apiserver:8080
+    # Conexiones inyectadas (en produccion: Vault / AWS Secrets Manager)
+    AIRFLOW_CONN_MLFLOW_PROD: http://:${MLFLOW_TOKEN}@mlflow-server:5000
+    AIRFLOW_CONN_MINIO_S3: aws://${MINIO_USER}:${MINIO_PASS}@/?endpoint_url=http%3A%2F%2Fminio%3A9000
+    AIRFLOW_CONN_WAREHOUSE_PG: postgresql://analytics:${PG_PASS}@postgres:5432/warehouse
+    AIRFLOW_CONN_MLFLOW_AI_GATEWAY: http://:${GATEWAY_TOKEN}@mlflow-server:5001
+  volumes:
+    - ./dags:/opt/airflow/dags:ro
+    - ./plugins:/opt/airflow/plugins:ro
+    - airflow-logs:/opt/airflow/logs
+  depends_on:
+    postgres: { condition: service_healthy }
+    mlflow-server: { condition: service_healthy }
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    networks: [mlops-net]
+    environment: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: ${PG_SUPERPASS} }
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./infra/init-databases.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U postgres"], interval: 5s, retries: 10 }
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-18T16-25-55Z
+    networks: [mlops-net]
+    command: server /data --console-address ":9001"
+    environment: { MINIO_ROOT_USER: ${MINIO_USER}, MINIO_ROOT_PASSWORD: ${MINIO_PASS} }
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [minio-data:/data]
+    healthcheck: { test: ["CMD", "mc", "ready", "local"], interval: 5s, retries: 10 }
+
+  minio-init:
+    image: minio/mc:latest
+    networks: [mlops-net]
+    depends_on: { minio: { condition: service_healthy } }
+    entrypoint: >
+      /bin/sh -c "mc alias set local http://minio:9000 ${MINIO_USER} ${MINIO_PASS};
+      mc mb --ignore-existing local/mlflow-artifacts local/ml-data-lake local/kb-prod; exit 0;"
+
+  mlflow-server:
+    image: ghcr.io/mlflow/mlflow:v3.0.1
+    networks: [mlops-net]
+    ports: ["5000:5000"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_PASS}
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql+psycopg2://mlflow:${MLFLOW_DB_PASS}@postgres:5432/mlflow
+      --artifacts-destination s3://mlflow-artifacts --serve-artifacts
+    depends_on:
+      postgres: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      retries: 10
+
+  airflow-init:       { <<: *airflow-common, command: db migrate, restart: "no" }
+  airflow-apiserver:  { <<: *airflow-common, command: api-server, ports: ["8080:8080"], depends_on: { airflow-init: { condition: service_completed_successfully } } }
+  airflow-scheduler:  { <<: *airflow-common, command: scheduler, depends_on: { airflow-init: { condition: service_completed_successfully } } }
+  airflow-dag-proc:   { <<: *airflow-common, command: dag-processor, depends_on: { airflow-init: { condition: service_completed_successfully } } }
+  airflow-triggerer:  { <<: *airflow-common, command: triggerer, depends_on: { airflow-init: { condition: service_completed_successfully } } }
+
+networks: { mlops-net: { driver: bridge } }
+volumes:  { pg-data: {}, minio-data: {}, airflow-logs: {} }
+\end{lstlisting}
+
+\subsection{Checklist de puesta en producción}
+
+Antes de autorizar el paso a producción de una plataforma combinada Airflow + MLflow, los equipos de Datos, MLOps y Seguridad deben verificar los controles de la Tabla~\ref{tab:checklist-produccion}.
+
+\begin{table}[htbp]
+\centering
+\caption{Checklist de puesta en producción para plataformas integradas Airflow + MLflow.}
+\label{tab:checklist-produccion}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{2.4cm} L{4.1cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Dimensión} &
+\textcolor{white}{\sffamily\bfseries Control obligatorio} &
+\textcolor{white}{\sffamily\bfseries Criterio de verificación en producción} \\
+\midrule
+\textbf{Seguridad y Secretos} &
+Sin secretos en código ni XCom &
+Credenciales en \textit{Secrets Backend} (Vault, AWS/GCP/Azure); \code{FERNET\_KEY} rotada y respaldada. \\
+\rowcolor{TableStripe}
+ &
+Aislamiento y RBAC &
+Bases de datos separadas Airflow/MLflow; RBAC por equipo; claves LLM centralizadas en \textit{AI Gateway}. \\
+ &
+Red e imágenes OCI &
+TLS extremo a extremo (UI, Task Execution API, MLflow); imágenes \code{K8sPodOp} fijadas por SHA-256. \\
+\midrule
+\rowcolor{TableStripe}
+\textbf{Idempotencia y Backups} &
+Reejecutabilidad determinista &
+Particionado por \code{ds} en S3 y \code{UPSERT}/sobrescritura atómica en bases relacionales y \pkg{pgvector}. \\
+ &
+Persistencia compartida &
+Cero dependencia de \code{/tmp} local; versionado activo en buckets de \textit{Artifact Store} y \textit{Golden Datasets}. \\
+\rowcolor{TableStripe}
+ &
+Recuperación ante desastres &
+Backups PITR en PostgreSQL (Airflow y MLflow) y simulacros periódicos de \textit{rollback} de \code{@champion}. \\
+\midrule
+\textbf{Observabilidad y Alertas} &
+Telemetría operacional &
+Métricas StatsD/OTel de Airflow y latencias de MLflow en Prometheus/Grafana con alertas de colas. \\
+\rowcolor{TableStripe}
+ &
+Trazabilidad cruzada &
+Etiquetas \code{airflow.dag\_id}/\code{run\_id} en MLflow; alertas Slack/PagerDuty con enlace a logs y trazas fallidas. \\
+ &
+Vigilancia post-despliegue &
+DAG diario de \textit{Data/Concept Drift} (PSI/KS) en ML y \textit{Scheduled Scorers} sobre trazas reales en LLMs. \\
+\midrule
+\rowcolor{TableStripe}
+\textbf{Costes de Cómputo y LLM} &
+Eficiencia de \textit{workers} &
+Sensores en \code{reschedule} o \textit{Deferrable Operators}; nodos GPU \textit{spot} autoescalables con \code{K8sPodOp}. \\
+ &
+Control de gasto LLM &
+Cuotas y \textit{rate-limiting} en \textit{AI Gateway}; \code{@scorer} de coste máximo por consulta en \textit{quality gates}. \\
+\rowcolor{TableStripe}
+ &
+Retención y purga &
+Limpieza periódica con \code{mlflow gc}, ciclo de vida S3 y purga programada de historial de Airflow. \\
+\midrule
+\textbf{Gobernanza y Auditoría} &
+Promoción por \textit{Aliases} &
+Prohibidos \textit{Stages} deprecados; separación \code{@challenger}/\code{@staging} vs. \code{@champion}/\code{@production}. \\
+\rowcolor{TableStripe}
+ &
+\textit{Quality gates} integrales &
+Evaluación siempre sobre \textit{holdout} o \textit{Golden Dataset} (exactitud, \textit{groundedness}, seguridad 100\,\%, sesgos). \\
+ &
+Linaje y cumplimiento &
+Linaje unificado (OpenLineage + Git SHA + MLflow Tags) preparado para auditoría (p.~ej. AI Act europeo). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Con esta convergencia se cierra el arco completo de la obra: Apache Airflow aporta la disciplina operacional que convierte pipelines heterogéneos en procesos fiables, repetibles y observables, mientras MLflow aporta el rigor científico y el gobierno de artefactos que permite evolucionar modelos predictivos, \textit{prompts}, sistemas RAG y agentes con confianza medible en producción.

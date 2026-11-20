@@ -1,0 +1,659 @@
+% ============================================================================
+% 01_fundamentos_orquestacion.tex
+% Capítulo 1: Paradigmas de Procesamiento y Fundamentos de Orquestación
+% ============================================================================
+
+\chapter{Paradigmas de Procesamiento y Fundamentos de Orquestación}\label{chap:fundamentos}
+\chaptermark{Fundamentos de Orquestación}
+
+En los sistemas modernos de ingeniería de datos e inteligencia artificial, el desafío dominante rara vez consiste en ejecutar una única consulta SQL o entrenar un modelo aislado sobre un fichero local. El verdadero reto ingenieril aparece cuando una organización debe coordinar decenas o miles de transformaciones interdependientes que atraviesan sistemas heterogéneos ---bases de datos transaccionales, \textit{data lakes}, almacenes analíticos en la nube, clústeres distribuidos de cómputo, APIs de terceros y servicios de aprendizaje automático--- cumpliendo acuerdos estrictos de frescura, calidad, trazabilidad y coste.
+
+Antes de estudiar la arquitectura interna de Apache Airflow o los flujos avanzados de MLOps y LLMOps con MLflow, resulta imprescindible comprender \textit{por qué} existen los orquestadores de flujos de trabajo (\textit{workflow orchestrators}). Para ello, este capítulo parte de una disección profunda de los dos paradigmas clásicos de procesamiento distribuido ---\textit{streaming} y \textit{batch}--- y de su convergencia en las arquitecturas \textit{Lakehouse} y \textit{Medallion}. A continuación, se analiza el problema estructural de coordinar ecosistemas heterogéneos, se formalizan los siete pilares que debe satisfacer todo orquestador moderno y se concluye con una comparativa rigurosa del panorama de herramientas disponible en 2025--2026.
+
+% ============================================================================
+\section{Streaming frente a Batch en profundidad}\label{sec:streaming-vs-batch}
+% ============================================================================
+
+Toda arquitectura de datos distribuida responde, en primera instancia, a una pregunta sobre la naturaleza temporal de la información que procesa: ¿se trata de un flujo continuo e infinito de eventos que exige respuestas inmediatas, o de un conjunto histórico acotado que conviene analizar de forma masiva y periódica? Aunque ambos paradigmas coexisten hoy en casi todas las plataformas empresariales, sus compromisos técnicos en latencia, gestión de estado, tolerancia a fallos y coste operativo son radicalmente distintos.
+
+\subsection{Procesamiento en streaming: tiempo real puro y micro-batching}\label{subsec:streaming}
+
+El procesamiento en \textit{streaming} opera sobre \textbf{flujos no acotados} (\textit{unbounded data streams}): secuencias potencialmente infinitas de eventos ordenados parcialmente en el tiempo que deben ingerirse, transformarse y materializarse a medida que se producen. A diferencia del modelo tradicional en el que primero se almacenan los datos y después se lanzan consultas sobre ellos, en el paradigma \textit{streaming} la lógica de cómputo permanece activa de manera continua y son los datos los que fluyen a través de los operadores.
+
+Dentro de este paradigma conviene distinguir dos arquitecturas de ejecución fundamentales:
+
+\begin{itemize}
+  \item \textbf{Tiempo real puro (\textit{event-at-a-time} o \textit{native streaming}):} cada evento se procesa individualmente en cuanto atraviesa el operador, logrando latencias del orden de milisegundos (típicamente $5\text{--}100\,\text{ms}$). Motores como \textbf{Apache Flink} y el pionero \textbf{Apache Storm} implementan este modelo, manteniendo operadores de larga duración conectados por canales de red con control de contrapresión (\textit{backpressure}).
+  \item \textbf{Micro-batching:} el flujo continuo se trocea en lotes diminutos de duración fija (por ejemplo, cada $500\,\text{ms}$ o $2\,\text{s}$) que se ejecutan sobre un motor de procesamiento por lotes de alta velocidad. Es el modelo clásico de \textbf{Spark Streaming} y el modo por defecto de \textbf{Apache Spark Structured Streaming}. Ofrece un excelente rendimiento agregado (\textit{throughput}) y unifica el código con el procesamiento \textit{batch}, a cambio de imponer un suelo de latencia ligado al tamaño del micro-lote.
+\end{itemize}
+
+\subsubsection{Gestión de estado, tiempo de evento y ventanas temporales}
+
+Las transformaciones sin estado (\textit{stateless}), como filtrar campos o enriquecer un JSON con una tabla de referencia estática, son triviales de paralelizar. Sin embargo, los casos de uso reales ---calcular el volumen de transacciones sospechosas de una tarjeta en los últimos diez minutos, detectar sesiones de navegación o cruzar dos flujos de eventos--- exigen \textbf{procesamiento con estado} (\textit{stateful stream processing}). En sistemas modernos como Flink, cada tarea paralela mantiene un almacén de estado local embebido (habitualmente basado en \pkg{RocksDB} para estados que superan la memoria RAM) y persiste instantáneas asíncronas distribuidas (\textit{checkpoints}) en almacenamiento de objetos (S3, GCS o HDFS) mediante variantes del algoritmo de Chandy-Lamport basadas en barreras de flujo (\textit{barrier alignment}). Además, los \textit{savepoints} permiten congelar manualmente el estado global para actualizar código o reescalar el clúster sin pérdida de consistencia.
+
+Para agregar un flujo infinito resulta obligatorio acotarlo mediante \textbf{ventanas temporales} (\textit{windows}). Antes de definirlas, es crucial distinguir tres relojes que raramente coinciden en sistemas distribuidos: el \textit{event time} (instante en que el fenómeno ocurrió en el origen, como un sensor IoT), el \textit{ingestion time} (instante de llegada al bróker) y el \textit{processing time} (reloj local de la máquina que ejecuta el operador). Cuando existen retrasos de red o dispositivos móviles temporalmente desconectados, operar sobre \textit{processing time} produce agregaciones no deterministas e irreproducibles; por ello, los sistemas rigurosos trabajan sobre \textit{event time}.
+
+Dado un flujo de eventos con marca temporal $t_e$, los tres tipos principales de ventanas son:
+\begin{enumerate}
+  \item \textbf{Ventanas fijas o \textit{tumbling windows}:} intervalos contiguos, disjuntos y de longitud fija $\Delta t$. Cada evento pertenece exactamente a una ventana $W_k = [k\cdot\Delta t,\, (k+1)\cdot\Delta t)$, con $k = \lfloor t_e / \Delta t \rfloor$. Ejemplo: número de clics por minuto exacto.
+  \item \textbf{Ventanas deslizantes o \textit{sliding/hopping windows}:} ventanas de longitud $\Delta t$ que avanzan con un paso (\textit{slide}) $\delta < \Delta t$. Un mismo evento participa en $\lceil \Delta t / \delta \rceil$ ventanas solapadas. Ejemplo: media móvil de temperatura de los últimos 15 minutos recalculada cada minuto.
+  \item \textbf{Ventanas de sesión (\textit{session windows}):} intervalos de longitud dinámica delimitados por un umbral de inactividad $\tau_{\text{gap}}$. Dos eventos consecutivos de una misma clave pertenecen a la misma sesión si $t_{e,i+1} - t_{e,i} \le \tau_{\text{gap}}$; en caso contrario, se cierra la sesión anterior y se abre una nueva. Son imprescindibles en analítica de comportamiento de usuarios.
+\end{enumerate}
+
+\subsubsection{Watermarks, datos tardíos y semánticas de entrega}
+
+Si un motor trabaja con \textit{event time}, surge una pregunta crítica: ¿cuándo puede estar seguro de que no llegarán más eventos pertenecientes a una ventana ya vencida para emitir su resultado definitivo? La respuesta son las \textbf{marcas de agua} (\textit{watermarks}). Una \textit{watermark} $W(t)$ es un metadato que fluye junto a los eventos y declara la heurística de que no se esperan futuros registros con marca temporal $t_e < W(t)$. Habitualmente se calcula como $W(t) = \max(t_e) - \delta_{\text{out-of-order}}$, donde $\delta_{\text{out-of-order}}$ representa el desorden máximo tolerado.
+
+No obstante, en redes reales siempre existen \textbf{datos tardíos} (\textit{late-arriving data}) que arriban después de superada la \textit{watermark}. Los motores maduros ofrecen tres estrategias combinables: descartarlos silenciosamente, mantener la ventana abierta durante un margen adicional (\textit{allowed lateness}) emitiendo actualizaciones o retracciones, o desviarlos a una salida lateral (\textit{side output}) para su auditoría y posterior reconciliación en un proceso \textit{batch}. La Figura~\ref{fig:streaming-windows} sintetiza gráficamente los tres modelos de ventanas y el papel de la \textit{watermark} frente a eventos retrasados.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[font=\sffamily\scriptsize]
+  % Eje temporal superior (referencia)
+  \draw[->, line width=1pt, color=PrimaryDark] (0, 5.2) -- (14.6, 5.2) node[right, font=\sffamily\scriptsize\bfseries] {Event Time ($t_e$)};
+  \foreach \x/\lbl in {0.8/00:00, 3.2/00:05, 5.6/00:10, 8.0/00:15, 10.4/00:20, 12.8/00:25} {
+    \draw[PrimaryDark] (\x, 5.1) -- (\x, 5.3);
+    \node[above=2pt, color=MutedGray] at (\x, 5.3) {\lbl};
+  }
+
+  % Eventos en el flujo (puntos)
+  \foreach \x/\y in {1.3/4.65, 2.1/4.65, 2.8/4.65, 4.0/4.65, 5.1/4.65, 6.2/4.65, 7.3/4.65, 9.6/4.65, 10.1/4.65, 11.4/4.65} {
+    \fill[PrimaryAccent] (\x, \y) circle (3.2pt);
+  }
+  % Evento tardío (late event)
+  \fill[CrimsonAccent] (2.4, 4.65) circle (3.8pt);
+  \draw[->, color=CrimsonAccent, line width=0.8pt] (2.4, 4.15) -- (2.4, 4.52);
+  \node[color=CrimsonAccent, font=\sffamily\tiny\bfseries, align=center] at (2.4, 3.92) {Evento tardío\\($t_e < W(t)$)};
+  \node[left=4pt, font=\sffamily\scriptsize\bfseries, color=PrimaryDark] at (0.6, 4.65) {Eventos};
+
+  % Línea vertical de Watermark W(t)
+  \draw[dashed, line width=1.2pt, color=AmberAccent] (7.6, 0.3) -- (7.6, 5.35);
+  \node[amberbox, minimum height=0.45cm, inner sep=3pt, font=\sffamily\tiny\bfseries] at (7.6, 5.85) {Watermark $W(t)$};
+  \draw[->, color=AmberAccent, line width=0.8pt] (7.6, 5.62) -- (7.6, 5.38);
+
+  % Fila 1: Tumbling Windows (fijas disjuntas)
+  \node[left=4pt, font=\sffamily\scriptsize\bfseries, color=PrimaryDark, align=right] at (0.6, 3.05) {Tumbling\\($\Delta t = 5\,\text{m}$)};
+  \draw[fill=InfoBg, draw=PrimaryAccent, rounded corners=2pt, line width=0.8pt] (0.8, 2.75) rectangle (3.16, 3.35) node[midway, color=PrimaryDark] {$W_0$ (cerrada)};
+  \draw[fill=InfoBg, draw=PrimaryAccent, rounded corners=2pt, line width=0.8pt] (3.22, 2.75) rectangle (5.56, 3.35) node[midway, color=PrimaryDark] {$W_1$ (cerrada)};
+  \draw[fill=ModernBg, draw=TealAccent, rounded corners=2pt, line width=0.8pt] (5.62, 2.75) rectangle (7.96, 3.35) node[midway, color=PrimaryDark] {$W_2$ (activa)};
+  \draw[fill=SoftBg, draw=MutedGray, dashed, rounded corners=2pt] (8.02, 2.75) rectangle (10.36, 3.35) node[midway, color=MutedGray] {$W_3$ (abierta)};
+  \draw[fill=SoftBg, draw=MutedGray, dashed, rounded corners=2pt] (10.42, 2.75) rectangle (12.76, 3.35) node[midway, color=MutedGray] {$W_4$};
+
+  % Fila 2: Sliding Windows (solapadas)
+  \node[left=4pt, font=\sffamily\scriptsize\bfseries, color=PrimaryDark, align=right] at (0.6, 1.80) {Sliding\\($\Delta t=10$, $\delta=5$)};
+  \draw[fill=InfoBg, draw=PrimaryAccent, rounded corners=2pt, line width=0.8pt] (0.8, 1.92) rectangle (5.56, 2.32) node[midway, color=PrimaryDark, font=\sffamily\tiny] {$S_0$: [00:00, 00:10)};
+  \draw[fill=ModernBg, draw=TealAccent, rounded corners=2pt, line width=0.8pt] (3.22, 1.42) rectangle (7.96, 1.82) node[midway, color=PrimaryDark, font=\sffamily\tiny] {$S_1$: [00:05, 00:15)};
+  \draw[fill=SoftBg, draw=PrimaryAccent, dashed, rounded corners=2pt] (5.62, 1.92) rectangle (10.36, 2.32) node[midway, color=MutedGray, font=\sffamily\tiny] {$S_2$: [00:10, 00:20)};
+  \draw[fill=SoftBg, draw=TealAccent, dashed, rounded corners=2pt] (8.02, 1.42) rectangle (12.76, 1.82) node[midway, color=MutedGray, font=\sffamily\tiny] {$S_3$: [00:15, 00:25)};
+
+  % Fila 3: Session Windows (por inactividad)
+  \node[left=4pt, font=\sffamily\scriptsize\bfseries, color=PrimaryDark, align=right] at (0.6, 0.72) {Session\\(gap $\tau_{\text{gap}}$)};
+  \draw[fill=WarnBg, draw=AmberAccent, rounded corners=2pt, line width=0.8pt] (1.15, 0.45) rectangle (7.45, 0.98) node[midway, color=PrimaryDark] {Sesión A (actividad continua)};
+  \draw[<->, color=MutedGray, line width=0.8pt] (7.50, 0.72) -- (9.40, 0.72) node[midway, above=1pt, font=\sffamily\tiny] {$\Delta t > \tau_{\text{gap}}$};
+  \draw[fill=WarnBg, draw=AmberAccent, rounded corners=2pt, line width=0.8pt] (9.45, 0.45) rectangle (11.65, 0.98) node[midway, color=PrimaryDark] {Sesión B};
+\end{tikzpicture}%
+}
+\caption{Modelos de ventanas temporales en procesamiento \textit{streaming} (\textit{tumbling}, \textit{sliding} y \textit{session}), avance de la \textit{watermark} $W(t)$ y llegada de un evento tardío.}
+\label{fig:streaming-windows}
+\end{figure}
+
+Por último, el diseño de cualquier pipeline \textit{streaming} debe precisar sus \textbf{semánticas de procesamiento}:
+\begin{itemize}
+  \item \textbf{\textit{At-most-once} (como mucho una vez):} si falla un nodo, los eventos en vuelo se pierden. Solo es aceptable en métricas aproximadas de telemetría no crítica.
+  \item \textbf{\textit{At-least-once} (al menos una vez):} ante un fallo se reproducen eventos desde el último \textit{checkpoint}, pudiendo procesarse duplicados. Es el estándar cuando el destino admite escrituras idempotentes (por ejemplo, \code{UPSERT} por clave única).
+  \item \textbf{\textit{Exactly-once} (exactamente una vez):} garantiza que cada evento afecta al estado interno y al sistema destino una sola vez, incluso ante caídas de red o de nodos. En el extremo a extremo (\textit{end-to-end exactly-once}) requiere fuentes reproducibles por \textit{offset} (como Kafka), \textit{checkpointing} atómico y destinos transaccionales con protocolo de confirmación en dos fases (\textit{two-phase commit}) o escritura idempotente.
+\end{itemize}
+
+\subsubsection{Stack tecnológico y casos de uso}
+
+El ecosistema de referencia para \textit{streaming} separa claramente la capa de transporte/log distribuido de la capa de cómputo. Para la ingesta durable de eventos destacan \textbf{Apache Kafka} (el estándar industrial basado en particiones replicadas y retención configurable) y \textbf{Apache Pulsar} (que desacopla el almacenamiento mediante Apache BookKeeper, facilitando el escalado independiente y la multitenencia). En el plano de procesamiento distribuido predominan \textbf{Apache Flink}, \textbf{Apache Spark Structured Streaming} y, en instalaciones heredadas, \textbf{Apache Storm}. En la nube pública, los proveedores ofrecen servicios gestionados equivalentes como \textbf{AWS Kinesis Data Streams / Managed Service for Apache Flink}, \textbf{Google Cloud Pub/Sub} combinado con \textbf{Cloud Dataflow} (Apache Beam) y \textbf{Azure Event Hubs}.
+
+Entre los casos de uso más representativos destacan la \textbf{monitorización industrial IoT} (detección temprana de anomalías térmicas o vibratorias en turbinas), la \textbf{detección de fraude en pagos} (bloqueo de transacciones en menos de $100\,\text{ms}$ combinando reglas y modelos en línea), las \textbf{recomendaciones en tiempo real} en redes sociales o comercio electrónico, la \textbf{actualización de precios bursátiles} y libros de órdenes de baja latencia, y las \textbf{alertas de ciberseguridad} (correlación continua de eventos SIEM para frenar exfiltraciones o ataques de denegación de servicio).
+
+\subsection{Procesamiento en batch: datos en reposo y evolución de motores}\label{subsec:batch}
+
+El procesamiento en \textit{batch} opera sobre \textbf{conjuntos de datos acotados} (\textit{bounded datasets}) almacenados en reposo. En lugar de reaccionar a cada evento individual, acumula grandes volúmenes de información ---desde gigabytes hasta petabytes--- y los procesa de manera masiva, bajo demanda o siguiendo un calendario programado (horario, diario, semanal o mensual). Al conocer el inicio y el fin del conjunto de entrada, el motor puede planificar optimizaciones globales imposibles en \textit{streaming}: estadísticas completas de cardinalidad, reordenación óptima de \textit{joins}, particionamiento balanceado y compresión columnar agresiva.
+
+\subsubsection{Del ocaso de Hadoop MapReduce a los motores analíticos modernos}
+
+Históricamente, el procesamiento distribuido \textit{batch} a escala masiva nació con el paradigma \textbf{Apache Hadoop MapReduce}. Sin embargo, en la industria actual MapReduce se encuentra prácticamente \textbf{deprecado} \badge[AmberAccent]{Deprecado} por cuatro limitaciones arquitectónicas bien documentadas:
+\begin{enumerate}
+  \item \textbf{Materialización intensiva a disco:} cada etapa Map y Reduce escribe sus resultados intermedios en disco local o en HDFS con replicación triple, convirtiendo el rendimiento en un cuello de botella de entrada/salida.
+  \item \textbf{Rigidez del modelo de dos fases:} algoritmos iterativos (como el descenso de gradiente en aprendizaje automático o algoritmos de grafos) requieren encadenar decenas de trabajos independientes MapReduce, multiplicando las lecturas y escrituras redundantes.
+  \item \textbf{Alta sobrecarga de arranque:} cada trabajo exige negociar contenedores en YARN e inicializar máquinas virtuales Java, penalizando los tiempos de respuesta incluso en lotes medianos.
+  \item \textbf{Ausencia de optimizador declarativo nativo:} obligó a desarrollar capas superiores como Apache Hive o Pig que traducían consultas a grafos rígidos de tareas MapReduce.
+\end{enumerate}
+
+Su sucesor indiscutible fue \textbf{Apache Spark}, que reemplazó el modelo lineal Map-Reduce por un grafo acíclico dirigido (DAG) de transformaciones ejecutadas preferentemente en memoria. Gracias al optimizador basado en costes \textbf{Catalyst}, al motor de ejecución de memoria fuera de \textit{heap} \textbf{Tungsten} (con generación de código en tiempo de ejecución) y al soporte nativo de formatos columnares (\pkg{Apache Parquet}, \pkg{ORC}), Spark redujo los tiempos de cómputo en uno o dos órdenes de magnitud respecto a MapReduce.
+
+En el ecosistema actual (2025--2026), Spark convive con un abanico especializado de motores \textit{batch} y analíticos:
+\begin{itemize}
+  \item \textbf{Motores SQL MPP federados (\textbf{Trino} / \textbf{Presto}):} diseñados para ejecutar consultas SQL interactivas y analíticas directamente sobre almacenamiento de objetos y múltiples fuentes heterogéneas sin mover previamente los datos.
+  \item \textbf{Almacenes SQL elásticos en la nube (\textbf{Snowflake}, \textbf{Google BigQuery}, \textbf{Amazon Redshift}, \textbf{Databricks SQL}):} separan almacenamiento y cómputo elástico, habilitando el patrón \textbf{ELT} (cargar primero y transformar mediante SQL versionado con herramientas como \pkg{dbt}).
+  \item \textbf{Motores analíticos \textit{in-process} vectorizados (\textbf{DuckDB}, \textbf{Polars}):} han demostrado que una porción muy relevante de las cargas \textit{batch} reales (entre $1\,\text{GB}$ y varios cientos de GB en Parquet) pueden procesarse en una sola máquina moderna de gran memoria con mayor velocidad y una fracción del coste operativo de un clúster distribuido.
+\end{itemize}
+
+Los casos de uso por excelencia del procesamiento \textit{batch} son los pipelines \textbf{ETL/ELT en \textit{data lakes}}, la \textbf{generación de informes regulatorios y de BI} (cierres contables, conciliación bancaria, métricas KPI diarias), el \textbf{entrenamiento periódico de modelos de Machine Learning} sobre históricos completos y el \textbf{análisis forense y agregado de logs} de infraestructura o aplicaciones.
+
+\subsection{Comparativa integral: Streaming frente a Batch}\label{subsec:tabla-streaming-batch}
+
+La Tabla~\ref{tab:streaming-vs-batch} sintetiza y amplía las dimensiones técnicas y operativas que diferencian ambos paradigmas, sirviendo como guía de decisión arquitectónica.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa técnica y operativa entre procesamiento en \textit{streaming} y procesamiento en \textit{batch}.}
+\label{tab:streaming-vs-batch}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{2.8cm} Y Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Dimensión} &
+\textcolor{white}{\sffamily\bfseries Procesamiento en Streaming} &
+\textcolor{white}{\sffamily\bfseries Procesamiento en Batch} \\
+\midrule
+Tipo de dato & Flujos continuos no acotados (\textit{unbounded streams}) de eventos en movimiento. & Conjuntos históricos acotados (\textit{bounded datasets}) almacenados en reposo. \\
+\rowcolor{TableStripe}
+Latencia típica & Milisegundos a segundos (tiempo real puro o micro-batching). & Minutos, horas o días (dependiente de la ventana de planificación). \\
+Modelo de cómputo & Operadores de larga duración; ventanas (\textit{tumbling}, \textit{sliding}, \textit{session}) y \textit{watermarks}. & Trabajos efímeros sobre particiones completas; optimización global del plan de ejecución. \\
+\rowcolor{TableStripe}
+Complejidad de estado & Muy alta: requiere \textit{state backends} (RocksDB), \textit{checkpointing}, gestión de desorden y datos tardíos. & Baja a moderada: estado persistido en tablas/ficheros entre etapas; recálculo determinista. \\
+Tolerancia a fallos & Recuperación continua desde \textit{checkpoints} y \textit{offsets} del bróker (\textit{at-least-once} / \textit{exactly-once}). & Reejecución idempotente de tareas o particiones fallidas desde almacenamiento durable. \\
+\rowcolor{TableStripe}
+Escalabilidad & Escalado elástico complejo (redistribución de particiones y migración de estado con \textit{savepoints}). & Escalado horizontal directo y altamente elástico (nodos o contenedores efímeros bajo demanda). \\
+Coste operativo & Alto y continuo: infraestructura activa 24/7 dimensionada para picos de tráfico; guardia operativa. & Optimizable y elástico: cómputo encendido solo durante la ventana de ejecución (\textit{pay-per-use}). \\
+\rowcolor{TableStripe}
+Casos de uso principales & Detección de fraude, IoT, precios bursátiles, alertas de ciberseguridad, recomendaciones en vivo. & ETL/ELT en \textit{data lakes}, BI y reporting financiero, entrenamiento ML, análisis histórico de logs. \\
+Tecnologías clave & Kafka, Pulsar, Flink, Storm, Spark Structured Streaming, AWS Kinesis, GCP Pub/Sub y Dataflow. & Apache Spark, Trino/Presto, DuckDB, Snowflake, BigQuery, dbt (MapReduce hoy deprecado). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Arquitecturas híbridas modernas: Lambda, Kappa y Lakehouse unificado}\label{subsec:lambda-kappa-lakehouse}
+
+En la práctica empresarial, raramente basta con elegir exclusivamente \textit{streaming} o \textit{batch}: una entidad bancaria necesita bloquear una tarjeta fraudulenta en $50\,\text{ms}$ (\textit{streaming}), pero también necesita reentrenar cada noche su modelo antifraude con tres años de transacciones consolidadas y etiquetas de contracargos recibidas semanas después (\textit{batch}). Para reconciliar ambas necesidades han surgido tres grandes patrones arquitectónicos:
+
+\begin{enumerate}
+  \item \textbf{Arquitectura Lambda (Nathan Marz):} divide la plataforma en tres capas: una \textit{Batch Layer} que almacena el conjunto maestro inmutable y recalcula vistas exactas periódicamente; una \textit{Speed Layer} en \textit{streaming} que procesa los datos recientes de baja latencia de forma aproximada; y una \textit{Serving Layer} que fusiona ambas vistas en tiempo de consulta. Su virtud es la resiliencia ante errores humanos (basta corregir el código \textit{batch} y recomputar). Su gran debilidad operativa es el \textbf{coste de duplicación}: mantener dos bases de código independientes (por ejemplo, Flink y Spark SQL) con idéntica lógica de negocio deriva inevitablemente en discrepancias sutiles y deuda técnica.
+  \item \textbf{Arquitectura Kappa (Jay Kreps):} elimina la capa \textit{batch} declarando que todo dato es un flujo de eventos retenido en un log inmutable (como Kafka con almacenamiento por niveles o \textit{tiered storage}). Si se modifica la lógica de negocio o se corrige un fallo, se despliega una nueva versión del pipeline \textit{streaming} leyendo desde el \textit{offset} cero en paralelo y, cuando alcanza el presente, se conmuta la tabla de servicio. Simplifica el código a un único motor, pero resulta poco eficiente cuando se requieren \textit{joins} históricos masivos, analítica exploratoria SQL o retención multi-anual económica.
+  \item \textbf{Lakehouse unificado (Delta Lake, Apache Iceberg, Apache Hudi):} representa el consenso industrial de 2025--2026. Introduce una capa de metadatos transaccionales ACID directamente sobre ficheros Parquet en almacenamiento de objetos barato (S3, GCS, ADLS). Estas tablas abiertas ofrecen \textit{time travel} (consultas a instantáneas pasadas), evolución controlada de esquemas, mutaciones \code{MERGE}/\code{UPDATE}/\code{DELETE} eficientes y soporte unificado tanto para escritores \textit{streaming} (p. ej., Flink escribiendo micro-commits en Iceberg) como para lectores y transformadores \textit{batch} (Spark, Trino, DuckDB).
+\end{enumerate}
+
+\begin{infobox}[Convergencia en el almacenamiento, protagonismo de la orquestación]
+El paradigma \textit{Lakehouse} unifica el formato de las tablas entre \textit{streaming} y \textit{batch}, pero \textbf{no elimina} la necesidad de orquestar. Incluso una tabla Iceberg o Delta Lake alimentada por Flink requiere procesos planificados periódicos: compactación de ficheros pequeños (\textit{small files compaction}), expiración de instantáneas antiguas (\textit{vacuum}), controles de calidad de datos, consolidaciones analíticas multi-fuente y disparo del entrenamiento de modelos. La orquestación es precisamente la capa que gobierna todo ese ciclo de vida.
+\end{infobox}
+
+% ============================================================================
+\section{Refinamiento progresivo y Arquitectura Medallion}\label{sec:medallion}
+% ============================================================================
+
+Cuando los datos fluyen desde decenas de sistemas operacionales hacia los consumidores analíticos y de inteligencia artificial, intentar aplicar en un solo paso la limpieza, la deduplicación, los cruces de negocio y las agregaciones finales produce pipelines monolíticos imposibles de depurar. Si una regla de negocio cambia o se detecta un error en una fórmula de ingresos, habría que volver a extraer los datos desde las fuentes operacionales (que quizá ya sobrescribieron el estado anterior). Para resolverlo se adopta el principio de \textbf{refinamiento progresivo}, cuya expresión estándar en la industria es la \textbf{Arquitectura Medallion}.
+
+\subsection{Las tres capas de calidad: Bronze, Silver y Gold}\label{subsec:capas-medallion}
+
+La Arquitectura Medallion organiza el \textit{Lakehouse} en tres zonas lógicas sucesivas, cada una con un contrato explícito de calidad, formato y gobernanza:
+
+\begin{description}
+  \item[Capa Bronze (\textit{Landing / Raw Zone}):] almacena los datos crudos tal como llegan de las fuentes heterogéneas (eventos JSON de Kafka, volcado CDC de bases de datos OLTP, respuestas de APIs REST o ficheros CSV/XML de proveedores). Su diseño es estrictamente \textbf{inmutable y \textit{append-only}}: jamás se sobrescribe un registro histórico original. Se aplica una filosofía \textbf{\textit{schema-on-read}} (o esquema laxo con columnas de captura de campos inesperados) para garantizar que un cambio no anunciado en el origen no detenga la ingesta. Únicamente se añaden metadatos técnicos de auditoría (\code{\_ingested\_at}, \code{\_source\_system}, \code{\_batch\_id}, \code{\_file\_path}). Constituye el seguro de reproducibilidad (\textit{replayability}) de toda la plataforma.
+  \item[Capa Silver (\textit{Cleansed / Conformed Zone}):] transforma los datos crudos de Bronze en entidades empresariales limpias, deduplicadas y conformadas. Aquí se impone \textbf{\textit{schema-on-write}} con tipos estrictos, normalización de husos horarios a UTC, unificación de codificaciones (UTF-8, códigos ISO de país y moneda), resolución de claves primarias duplicadas, filtrado de registros corruptos hacia tablas de cuarentena y aplicación de controles automáticos de calidad. También se gestiona la historia de entidades mutables mediante dimensiones lentamente cambiantes (SCD Tipo 2, con columnas \code{valid\_from} y \code{valid\_to}) y se realizan los primeros cruces de enriquecimiento.
+  \item[Capa Gold (\textit{Curated / Serving Zone}):] contiene los conjuntos de datos altamente agregados y modelados para casos de uso específicos de negocio y consumo final. Incluye esquemas en estrella (tablas de hechos y dimensiones) para herramientas de BI, \textit{data marts} departamentales (finanzas, riesgo, marketing), tablas de características (\textit{feature tables}) listas para alimentar \textit{Feature Stores} y modelos de ML, así como colecciones documentales depuradas y fragmentadas para sistemas RAG y LLMs. Se optimiza para lecturas rápidas mediante particionamiento, ordenación (\textit{Z-ordering} o \textit{liquid clustering}) y agregaciones precalculadas.
+\end{description}
+
+La Tabla~\ref{tab:contratos-medallion} recoge los contratos técnicos y operativos habituales que diferencian cada capa en un \textit{Lakehouse} empresarial.
+
+\begin{table}[htbp]
+\centering
+\caption{Contratos técnicos de formato, esquema, gobernanza y orquestación por capa en la Arquitectura Medallion.}
+\label{tab:contratos-medallion}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{2.5cm} Y Y Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Dimensión} &
+\textcolor{white}{\sffamily\bfseries Capa Bronze (Raw)} &
+\textcolor{white}{\sffamily\bfseries Capa Silver (Conformed)} &
+\textcolor{white}{\sffamily\bfseries Capa Gold (Curated)} \\
+\midrule
+Fidelidad y mutabilidad & Copia fiel \textit{append-only} e inmutable del origen. & Deduplicada, limpia y conformada; admite \code{MERGE}/SCD2. & Agregada y modelada por dominio de negocio o ML. \\
+\rowcolor{TableStripe}
+Estrategia de esquema & \textit{Schema-on-read} (tolerante a columnas nuevas). & \textit{Schema-on-write} estricto con contrato validado. & Esquema dimensional estable (estrella / \textit{feature table}). \\
+Formato habitual & JSON, Avro, CSV o Parquet crudo con metadatos técnicos. & Apache Iceberg / Delta Lake / Parquet optimizado. & Iceberg / Delta con \textit{clustering} o tablas en Warehouse. \\
+\rowcolor{TableStripe}
+Calidad y validación & Integridad técnica (tamaño, formato legible, \textit{checksum}). & Unicidad, nulos, rangos, integridad referencial, cuarentena. & Reconciliación de negocio, KPIs, frescura y SLAs estrictos. \\
+Cadencia típica & Streaming (seg--min) o volcado \textit{batch} frecuente. & Micro-batch o \textit{scheduling} horario / cuasi-horario. & \textit{Scheduling} horario, diario o disparado por \textit{Assets}. \\
+\rowcolor{TableStripe}
+Consumidores & Exclusivo para ingenieros de datos y procesos de \textit{replay}. & Científicos de datos, analistas técnicos, pipelines Gold. & BI corporativo, dirección, Feature Stores, sistemas RAG/LLM. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{De las ventanas cortas al scheduling de ventanas largas}\label{subsec:ventanas-scheduling}
+
+Un matiz arquitectónico decisivo en la Arquitectura Medallion es la \textbf{transición temporal entre capas}. La ingestión desde sistemas de eventos hacia la capa Bronze ---e incluso ciertas proyecciones operativas hacia Silver--- suele ejecutarse mediante procesos \textit{streaming} o \textit{micro-batch} con ventanas cortas (segundos o minutos), proporcionando visibilidad casi inmediata.
+
+Sin embargo, a medida que avanzamos hacia las transformaciones Silver consolidadas y la construcción de la capa Gold sobre grandes volúmenes históricos, el problema deja de ser \textit{streaming} y pasa a ser \textbf{\textit{scheduling}}. Existen tres razones técnicas de peso:
+\begin{enumerate}
+  \item \textbf{Consistencia entre fuentes heterogéneas:} una tabla Gold de rentabilidad diaria exige cruzar ventas en tiempo real con costes logísticos que llegan en un fichero SFTP a las 03:00 UTC y con tipos de cambio oficiales publicados por el banco central al cierre de jornada.
+  \item \textbf{Eficiencia de cómputo y almacenamiento:} ejecutar agregaciones complejas o compactación de ficheros Parquet cada pocos segundos sobre terabytes dispara los costes y genera miles de ficheros diminutos que degradan la lectura.
+  \item \textbf{Semántica de negocio y auditoría:} los informes contables, los cierres regulatorios y los cortes de entrenamiento de modelos requieren fronteras temporales deterministas (cierres horarios, diarios o mensuales) verificables y reproducibles.
+\end{enumerate}
+
+La Figura~\ref{fig:medallion} ilustra el flujo completo de refinamiento progresivo, evidenciando cómo las ventanas cortas de \textit{streaming} ceden progresivamente el protagonismo a las ventanas largas gobernadas por el plano de orquestación.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.8cm and 1.1cm]
+  % Fuentes heterogéneas
+  \node[subbox, text width=2.7cm] (src1) {\textbf{Eventos / IoT}\\Kafka, Pulsar, Kinesis};
+  \node[subbox, text width=2.7cm, below=0.45cm of src1] (src2) {\textbf{Bases OLTP / CDC}\\PostgreSQL, Oracle};
+  \node[subbox, text width=2.7cm, below=0.45cm of src2] (src3) {\textbf{APIs y SaaS}\\CRM, GA4, Stripe};
+  \node[subbox, text width=2.7cm, below=0.45cm of src3] (src4) {\textbf{Ficheros / Logs}\\SFTP, S3, CSV/JSON};
+
+  % Grupo Fuentes
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(src1)(src4), label={[font=\sffamily\scriptsize\bfseries, text=PrimaryDark]above:Fuentes Heterogéneas}] (gsrc) {};
+  \end{scope}
+
+  % Capas Medallion
+  \node[amberbox, text width=3.1cm, minimum height=3.8cm, right=1.35cm of $(src2.east)!0.5!(src3.east)$] (bronze) {%
+    {\small\textbf{CAPA BRONZE}}\\[4pt]
+    {\scriptsize\textit{Raw / Landing Zone}}\\[6pt]
+    \rule{2.6cm}{0.4pt}\\[5pt]
+    {\scriptsize\raggedright
+    -- Ingesta \textit{append-only}\\
+    -- Datos inmutables\\
+    -- \textit{Schema-on-read}\\
+    -- Metadatos de auditoría\\
+    -- Base para \textit{replay}\par}
+  };
+
+  \node[archbox, text width=3.1cm, minimum height=3.8cm, right=1.25cm of bronze] (silver) {%
+    {\small\textbf{CAPA SILVER}}\\[4pt]
+    {\scriptsize\textit{Cleansed / Conformed}}\\[6pt]
+    \rule{2.6cm}{0.4pt}\\[5pt]
+    {\scriptsize\raggedright
+    -- Deduplicación estricta\\
+    -- \textit{Schema-on-write}\\
+    -- Calidad y cuarentena\\
+    -- Enriquecimiento y SCD2\\
+    -- Formato Parquet/Iceberg\par}
+  };
+
+  \node[tealbox, text width=3.1cm, minimum height=3.8cm, right=1.25cm of silver] (gold) {%
+    {\small\textbf{CAPA GOLD}}\\[4pt]
+    {\scriptsize\textit{Curated / Business}}\\[6pt]
+    \rule{2.6cm}{0.4pt}\\[5pt]
+    {\scriptsize\raggedright
+    -- Agregados de negocio\\
+    -- Hechos y Dimensiones\\
+    -- \textit{Feature Tables} ML\\
+    -- Corpus limpio RAG/LLM\\
+    -- Optimizada por SLA\par}
+  };
+
+  % Consumidores
+  \node[subbox, text width=2.7cm, right=1.35cm of gold, yshift=1.35cm] (cons1) {\textbf{BI y Reporting}\\Dashboards, SQL, Finanzas};
+  \node[subbox, text width=2.7cm, below=0.55cm of cons1] (cons2) {\textbf{MLOps y ML}\\Feature Store, Entrenamiento};
+  \node[subbox, text width=2.7cm, below=0.55cm of cons2] (cons3) {\textbf{LLMOps y GenAI}\\Índices RAG, Evaluaciones};
+
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(cons1)(cons3), label={[font=\sffamily\scriptsize\bfseries, text=PrimaryDark]above:Consumo Analítico e IA}] (gcons) {};
+  \end{scope}
+
+  % Flechas principales
+  \draw[flowarrow] (src1.east) -- ($(bronze.west)+(0,1.25)$);
+  \draw[flowarrow] (src2.east) -- ($(bronze.west)+(0,0.42)$);
+  \draw[flowarrow] (src3.east) -- ($(bronze.west)+(0,-0.42)$);
+  \draw[flowarrow] (src4.east) -- ($(bronze.west)+(0,-1.25)$);
+
+  \draw[flowarrow, line width=1.3pt] (bronze.east) -- node[elabel, above=2pt] {Limpieza} (silver.west);
+  \draw[tealarrow, line width=1.3pt] (silver.east) -- node[elabel, above=2pt] {Modelado} (gold.west);
+
+  \draw[tealarrow] ($(gold.east)+(0,1.1)$) -- (cons1.west);
+  \draw[tealarrow] (gold.east) -- (cons2.west);
+  \draw[tealarrow] ($(gold.east)+(0,-1.1)$) -- (cons3.west);
+
+  % Franja superior: Streaming ventanas cortas
+  \draw[decorate, decoration={brace, amplitude=6pt, raise=4pt}, line width=1pt, color=AmberAccent]
+    ($(gsrc.north west)+(0,0.55)$) -- ($(silver.north)+(0,0.55)$)
+    node[midway, above=11pt, font=\sffamily\scriptsize\bfseries, text=AmberAccent, align=center]
+    {Ventanas cortas (ms -- min): Ingesta Streaming / Micro-batch (Kafka, Flink, Spark Streaming)};
+
+  % Banda inferior: Orquestación ventanas largas
+  \node[darkbox, text width=16.2cm, minimum height=0.95cm, below=0.95cm of silver] (orch) {%
+    \textbf{PLANO DE ORQUESTACIÓN Y SCHEDULING (Ventanas largas: horas, días, meses --- Apache Airflow)}\\[2pt]
+    {\scriptsize Coordinación de dependencias multi-fuente \textbullet{} Compactación Iceberg/Delta \textbullet{} Gates de calidad \textbullet{} Backfills \textbullet{} Alertas SLA \textbullet{} Reentrenamiento ML}
+  };
+
+  \draw[dashedarrow, color=PrimaryDark] (orch.north -| bronze.south) -- (bronze.south);
+  \draw[dashedarrow, color=PrimaryDark] (orch.north -| silver.south) -- (silver.south);
+  \draw[dashedarrow, color=PrimaryDark] (orch.north -| gold.south) -- (gold.south);
+  \draw[dashedarrow, color=TealAccent] (orch.north -| gcons.south) -- (gcons.south);
+\end{tikzpicture}%
+}
+\caption{Arquitectura Medallion (Bronze, Silver, Gold) integrando ventanas cortas de procesamiento \textit{streaming} con el plano de orquestación y \textit{scheduling} de ventanas largas.}
+\label{fig:medallion}
+\end{figure}
+
+\begin{examplebox}[Refinamiento progresivo de pedidos en comercio electrónico]
+Considérese una plataforma de comercio electrónico que registra $2{,}5$ millones de eventos diarios de compra:
+\begin{itemize}
+  \item \textbf{Bronze (\code{bronze.raw\_orders\_events}):} un consumidor Kafka vuelca cada 5 minutos los eventos JSON originales en ficheros Parquet particionados por \code{ingestion\_date}. Incluye duplicados por reintentos de red de la app móvil y precios en distintas divisas.
+  \item \textbf{Silver (\code{silver.orders\_conformed}):} un DAG horario orquestado en Airflow lanza un trabajo Spark/SQL que deduplica por \code{order\_id} conservando el evento más reciente, convierte todos los importes a euros usando el tipo de cambio oficial del día, valida que \code{total\_amount >= 0} y separa pedidos con SKU inexistente en \code{silver.orders\_quarantine}.
+  \item \textbf{Gold (\code{gold.fact\_daily\_revenue} y \code{gold.customer\_ltv\_features}):} a las 01:30 UTC, tras cerrarse las 24 particiones Silver y recibirse el fichero de devoluciones logísticas, otro flujo construye los agregados diarios de facturación para dirección financiera y actualiza las variables de valor de vida del cliente (\textit{LTV}) consumidas por el modelo de retención.
+\end{itemize}
+\end{examplebox}
+
+% ============================================================================
+\section{El verdadero reto: orquestar sistemas heterogéneos}\label{sec:sistemas-heterogeneos}
+% ============================================================================
+
+Una objeción frecuente entre quienes se inician en ingeniería de datos es la siguiente: \textit{``Si Apache Spark permite escribir transformaciones complejas en Python o Scala y encadenar lecturas de varias bases de datos, ¿por qué no escribir un único programa Spark gigante y lanzarlo cada noche con \code{cron}?''} La experiencia en entornos productivos reales demuestra rápidamente que ese enfoque colapsa por cinco razones estructurales:
+
+\begin{enumerate}
+  \item \textbf{Infraestructura distribuida y equipos desacoplados:} las etapas de un pipeline empresarial rara vez residen en un solo servidor o dominio. La extracción de pagos puede ejecutarse en un clúster Kubernetes gestionado por el equipo de FinTech, el modelado analítico en Snowflake a cargo de Analytics Engineering y la generación de \textit{embeddings} en nodos con GPU administrados por el equipo de IA. Ningún motor de cómputo único posee visibilidad ni permisos universales sobre todos los entornos.
+  \item \textbf{Tecnologías dispares y cajas negras:} junto a Spark o SQL coexisten piezas que no pueden reescribirse: software ERP propietario, ejecutables binarios heredados, APIs SaaS externas (Salesforce, Google Analytics, Stripe) sin acceso al código fuente y sometidas a límites de tasa (\textit{rate limits}), o servicios de terceros que depositan ficheros en servidores SFTP a horas impredecibles.
+  \item \textbf{Ventanas temporales asimétricas:} las fuentes no avanzan al unísono. Mientras un flujo de clics se consolida cada 15 minutos, los datos bancarios llegan una vez al día en días hábiles y una encuesta de satisfacción se actualiza semanalmente. Coordinar cuándo es seguro cruzar información de cadencias dispares exige estado persistente y reglas explícitas de dependencia.
+  \item \textbf{Grafos de dependencias no triviales:} los flujos productivos no son cadenas lineales $A \to B \to C$, sino grafos dirigidos con bifurcaciones paralelas (\textit{fan-out}), puntos de sincronización (\textit{fan-in}), ramas condicionales según resultados de validación y dependencias cruzadas entre flujos de distintos departamentos. Además, si falla la tarea 14 de 20, el sistema debe permitir reanudar exactamente desde la tarea 14 sin recomputar las trece anteriores.
+  \item \textbf{Observabilidad fragmentada y recuperación ante fallos:} sin un plano de control unificado, diagnosticar por qué un cuadro de mando muestra datos desactualizados obliga a revisar logs dispersos en decenas de servidores, adivinar qué proceso falló silenciosamente y reconstruir manualmente el estado de días atrasados (\textit{backfill}).
+\end{enumerate}
+
+\begin{warningbox}[El anti-patrón de ``cron + scripts bash encadenados'']
+Programar scripts independientes mediante \code{crontab} en una o varias máquinas virtuales ---dejando ``márgenes de seguridad'' arbitrarios (p. ej., extracción a las 01:00, transformación a las 02:30, carga a las 04:00)--- es uno de los anti-patrones más costosos en ingeniería de datos:
+\begin{itemize}
+  \item \textbf{Acoplamiento temporal ciego:} si la extracción tarda 95 minutos por un pico de ventas (Black Friday), la transformación arranca a las 02:30 sobre datos incompletos y propaga métricas silenciosamente corruptas al negocio.
+  \item \textbf{Sin gestión de estado ni reanudación parcial:} un fallo transitorio de red en el minuto 80 obliga a relanzar manualmente todo el proceso o a aplicar parches artesanales.
+  \item \textbf{Condiciones de carrera por solapamiento:} si un proceso horario tarda 70 minutos, \code{cron} lanza una segunda instancia concurrente que puede corromper ficheros temporales o agotar la memoria del host.
+  \item \textbf{Ausencia de observabilidad, SLAs y auditoría:} no existe historial centralizado de ejecuciones, tiempos de respuesta, alertas configurables ni linaje.
+  \item \textbf{Gestión insegura de credenciales:} contraseñas y claves API acaban desperdigadas en variables locales, ficheros \code{.env} o argumentos de línea de comandos.
+  \item \textbf{Pesadilla en reprocesamientos (\textit{backfills}):} regenerar 90 días históricos tras corregir una fórmula exige bucles manuales propensos a errores y sin control de concurrencia.
+\end{itemize}
+\end{warningbox}
+
+De todas estas limitaciones nace la necesidad de un \textbf{orquestador de flujos de trabajo}: un sistema dedicado al \textbf{plano de control} (\textit{control plane}) cuya responsabilidad no es sustituir a Spark, Snowflake o Flink en el procesamiento pesado de datos (\textit{data plane}), sino coordinar, programar, supervisar y recuperar de forma fiable el grafo completo de operaciones entre ellos.
+
+% ============================================================================
+\section{Los siete pilares de un orquestador de datos moderno}\label{sec:siete-pilares}
+% ============================================================================
+
+Formalmente, la \textbf{orquestación de datos} es el proceso de coordinar, automatizar, supervisar e integrar el movimiento y la transformación de datos a través de sistemas heterogéneos para garantizar flujos de trabajo eficientes, reproducibles y fiables. Un orquestador de nivel productivo se sustenta sobre \textbf{siete pilares arquitectónicos} complementarios, articulados alrededor de su plano de control tal como representa la Figura~\ref{fig:siete-pilares}.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.8cm and 1.0cm]
+  % Núcleo central: Plano de Control
+  \node[darkbox, text width=4.4cm, minimum height=1.85cm] (core) {%
+    {\small\textbf{PLANO DE CONTROL}}\\[2pt]
+    {\small\textbf{DEL ORQUESTADOR}}\\[4pt]
+    {\scriptsize Estado persistente \textbullet{} Metadatos\\
+    Motor de DAGs y Eventos}
+  };
+
+  % Fila superior (3 pilares)
+  \node[archbox, text width=3.5cm, above left=1.25cm and 0.9cm of core] (p1) {%
+    \textbf{1. Scheduling}\\
+    {\scriptsize Cron, intervalos de datos,\\triggers de eventos/assets}
+  };
+  \node[archbox, text width=3.5cm, above=1.25cm of core] (p2) {%
+    \textbf{2. Dependency Mgmt.}\\
+    {\scriptsize DAGs, orden topológico,\\intra/inter-DAG, backpressure}
+  };
+  \node[archbox, text width=3.5cm, above right=1.25cm and 0.9cm of core] (p3) {%
+    \textbf{3. Monitoring \& Alerting}\\
+    {\scriptsize SLAs, trazas, métricas,\\alertas en tiempo real}
+  };
+
+  % Laterales (2 pilares)
+  \node[tealbox, text width=3.4cm, left=1.5cm of core] (p4) {%
+    \textbf{4. Integration}\\
+    {\scriptsize Catálogo de conectores,\\Hooks, Secrets, APIs}
+  };
+  \node[tealbox, text width=3.4cm, right=1.5cm of core] (p5) {%
+    \textbf{5. Scalability}\\
+    {\scriptsize Workers distribuidos,\\elasticidad, pools/colas}
+  };
+
+  % Fila inferior intermedia (2 pilares)
+  \node[amberbox, text width=3.8cm, below left=1.25cm and 0.25cm of core] (p6) {%
+    \textbf{6. Version Control}\\
+    {\scriptsize Workflows-as-Code, GitOps,\\CI/CD, reproducibilidad y rollback}
+  };
+  \node[amberbox, text width=3.8cm, below right=1.25cm and 0.25cm of core] (p7) {%
+    \textbf{7. Error Handling}\\
+    {\scriptsize Backoff exponencial, DLQ,\\fallbacks y rutas alternativas}
+  };
+
+  % Plano de datos inferior
+  \node[subbox, text width=15.0cm, minimum height=0.85cm, below=3.15cm of core, draw=PrimaryAccent, fill=SoftBg] (dp) {%
+    {\footnotesize\bfseries\color{PrimaryDark}PLANO DE DATOS Y CÓMPUTO HETEROGÉNEO}\\[2pt]
+    {\scriptsize Apache Spark \textbullet{} Data Warehouses SQL (Snowflake, BigQuery, Postgres) \textbullet{} Almacenamiento S3/GCS \textbullet{} Kubernetes/GPUs \textbullet{} APIs SaaS \textbullet{} MLflow}
+  };
+
+  % Conexiones pilares <-> núcleo
+  \draw[flowarrow] (p1.south) -- ($(core.north west)+(0.6,0)$);
+  \draw[flowarrow] (p2.south) -- (core.north);
+  \draw[flowarrow] (p3.south) -- ($(core.north east)+(-0.6,0)$);
+  \draw[tealarrow] (p4.east) -- (core.west);
+  \draw[tealarrow] (p5.west) -- (core.east);
+  \draw[flowarrow, color=AmberAccent] (p6.north) -- ($(core.south west)+(0.8,0)$);
+  \draw[flowarrow, color=AmberAccent] (p7.north) -- ($(core.south east)+(-0.8,0)$);
+
+  % Conexión plano de control -> plano de datos
+  \draw[dashedarrow, line width=1.1pt, color=PrimaryDark] (core.south) -- node[elabel] {Despacho y control} (dp.north);
+\end{tikzpicture}%
+}
+\caption{Los siete pilares de un orquestador de datos moderno articulados alrededor del plano de control y desacoplados del plano de datos.}
+\label{fig:siete-pilares}
+\end{figure}
+
+A continuación se analiza cada pilar desde una doble perspectiva: sus fundamentos arquitectónicos y su manifestación en casos operativos reales.
+
+\subsection{Pilar 1: Planificación (Scheduling)}\label{subsec:pilar-scheduling}
+
+La planificación automatiza el disparo de flujos de trabajo sin intervención manual, garantizando consistencia y puntualidad. Un orquestador moderno debe soportar dos modalidades complementarias:
+
+\begin{itemize}
+  \item \textbf{Planificación temporal (\textit{time-based scheduling}):} va más allá de las expresiones \code{cron} clásicas (\code{0 0 * * *}). Incorpora el concepto de \textbf{intervalo de datos} (\textit{data interval}) ---distinguiendo el rango lógico de información que se procesa de la hora real de ejecución---, conciencia de zonas horarias y cambios de horario de verano (DST), así como calendarios personalizados (\textit{Timetables}) capaces de operar únicamente en días hábiles bursátiles excluyendo festivos nacionales.
+  \item \textbf{Planificación reactiva o basada en eventos (\textit{event/asset-driven scheduling}):} dispara un flujo en cuanto ocurre una condición externa verificable, como la llegada de un nuevo fichero a un \textit{bucket} S3, la publicación de un mensaje en Kafka o la actualización de una tabla/activo de datos (\textit{Asset}) por parte de un pipeline productor. Reduce la latencia ociosa y elimina sondeos innecesarios.
+\end{itemize}
+
+\textbf{Métricas clave:} retraso de planificación (\textit{scheduling lag}: diferencia entre la hora prevista de inicio y el arranque efectivo) y tasa de puntualidad respecto al calendario comprometido.
+
+\textbf{Caso operativo (Retail 00:00):} una cadena de comercio minorista programa cada noche a las 00:00 un pipeline ETL que extrae las ventas cerradas del día en todos sus puntos de venta, consolida devoluciones y promociones en un modelo resumen y carga las tablas en el \textit{data warehouse}. Cuando el equipo de dirección y analítica accede a los cuadros de mando a primera hora de la mañana, todos los informes están actualizados con consistencia exacta para la fecha comercial anterior.
+
+\subsection{Pilar 2: Gestión de dependencias (Dependency Management)}\label{subsec:pilar-dependencias}
+
+La gestión de dependencias garantiza que las tareas se ejecuten estrictamente en el orden válido y solo cuando sus prerequisitos hayan concluido satisfactoriamente. Matemáticamente, un flujo de trabajo se modela como un \textbf{grafo acíclico dirigido} $G = (V, E)$, donde cada vértice $v \in V$ representa una unidad atómica de trabajo (\textit{task}) y cada arista dirigida $(u, v) \in E$ establece que $v$ no puede iniciar hasta que $u$ alcance un estado terminal compatible. La aciclicidad asegura la existencia de al menos un ordenamiento topológico y evita bloqueos infinitos (\textit{deadlocks}).
+
+En entornos maduros, la gestión de dependencias abarca tres niveles:
+\begin{enumerate}
+  \item \textbf{Dependencias intra-DAG:} cadenas secuenciales, paralelismo (\textit{fan-out}), sincronización (\textit{fan-in}), bifurcaciones condicionales y reglas de disparo avanzadas (\textit{trigger rules}, como ejecutar una tarea de limpieza siempre aunque alguna rama previa haya fallado).
+  \item \textbf{Dependencias inter-DAG:} coordinación entre flujos propiedad de distintos equipos mediante sensores externos o, preferiblemente en arquitecturas modernas, contratos basados en \textit{Data Assets} que desacoplan el horario del productor del horario del consumidor.
+  \item \textbf{Control de concurrencia y \textit{backpressure}:} limitación del número de tareas simultáneas sobre un recurso compartido para evitar que una cascada de dependencias satisfechas sature una base de datos destino.
+\end{enumerate}
+
+\textbf{Caso operativo (Cadena ETL):} en un pipeline de analítica, la tarea de transformación y cálculo de márgenes depende de la finalización íntegra de la extracción de pedidos y de la extracción del catálogo actualizado de productos. El orquestador ejecuta ambas extracciones en paralelo, pero bloquea el inicio de la transformación hasta que las dos terminan con estado exitoso; si falla el catálogo, la transformación se marca automáticamente como \code{upstream\_failed} evitando generar márgenes corruptos.
+
+\subsection{Pilar 3: Monitorización y alertas (Monitoring \& Alerting)}\label{subsec:pilar-monitoring}
+
+Orquestar a ciegas equivale a multiplicar el radio de impacto de los fallos. La observabilidad en un orquestador comprende tres capas complementarias: \textbf{métricas agregadas} (duración de tareas en percentiles $p_{50}/p_{95}/p_{99}$, tasa de fallos, tamaño de colas de espera, salud del \textit{scheduler}), \textbf{logs centralizados} indexados por ejecución e intento, y \textbf{trazas y linaje} (qué tarea escribió qué tabla y en cuánto tiempo).
+
+Sobre esta telemetría se configuran reglas de \textbf{alertas accionables} y cumplimiento de \textbf{SLAs} (\textit{Service Level Agreements}): no solo interesa saber si una tarea ha fallado explícitamente, sino también si está tardando anómalamente más de lo habitual o si corre riesgo de incumplir la ventana de entrega al negocio. Las notificaciones deben integrarse con canales operativos (Slack, Microsoft Teams, correo electrónico, PagerDuty u Opsgenie) diferenciando severidad para evitar la fatiga de alertas.
+
+\textbf{Caso operativo (Entrenamiento ML $> 2\,\text{h}$):} un pipeline semanal de aprendizaje automático encadena preprocesamiento, entrenamiento distribuido y validación estadística. La duración habitual del entrenamiento es de 45 minutos. Se configura una alerta de SLA a las 2 horas: si el entrenamiento supera ese umbral ---por ejemplo, debido a una fuga de memoria, un cuello de botella en la carga de datos o un nodo GPU degradado--- el orquestador notifica inmediatamente al ingeniero de datos y MLOps antes de que el trabajo bloquee el clúster todo el fin de semana o expire el \textit{timeout}.
+
+\subsection{Pilar 4: Integración (Integration)}\label{subsec:pilar-integracion}
+
+Un orquestador vive rodeado de sistemas externos. Su productividad depende directamente de la amplitud, calidad y estandarización de su ecosistema de conectores. En lugar de obligar a cada equipo a escribir clientes HTTP artesanales, gestionar paginación, refrescar tokens OAuth2 o lidiar con controladores JDBC específicos, un orquestador maduro ofrece paquetes de conectores probados por la comunidad (en Airflow denominados \textit{Providers}, con sus correspondientes \textit{Hooks} y \textit{Operators}).
+
+Igualmente crucial es el \textbf{desacoplamiento de credenciales}: las definiciones de flujos nunca deben contener contraseñas ni claves privadas, sino referencias simbólicas a conexiones gestionadas de forma cifrada o delegadas a gestores de secretos corporativos (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager, Azure Key Vault), como se estudiará en detalle en los Capítulos 4 y 5.
+
+\textbf{Caso operativo (Google Analytics $\to$ Salesforce):} el departamento de marketing necesita enriquecer la ficha de clientes potenciales en Salesforce con métricas semanales de interacción capturadas en Google Analytics. Mediante conectores nativos, el orquestador autentica vía cuenta de servicio contra la API de Google Analytics, agrega las sesiones por campaña y carga el resultado en Salesforce usando su Bulk API, eliminando centenares de líneas de código de integración frágil y mantenimiento costoso.
+
+\subsection{Pilar 5: Escalabilidad (Scalability)}\label{subsec:pilar-escalabilidad}
+
+Las necesidades de datos de una organización crecen tanto en \textbf{volumen} (de gigabytes a terabytes diarios) como en \textbf{complejidad y concurrencia} (de diez pipelines a miles de DAGs simultáneos). Un orquestador escalable debe desacoplar la toma de decisiones (\textit{scheduler}) de la ejecución efectiva (\textit{workers}), permitiendo escalar horizontalmente la capacidad de cómputo añadiendo nodos o contenedores efímeros bajo demanda.
+
+La escalabilidad profesional también exige \textbf{aislamiento de recursos}: que un proceso pesado de inferencia por lotes o un fallo de memoria (\textit{OOMKill}) en el flujo de un equipo no tumbe el planificador ni degrade los flujos críticos de facturación de otro equipo. Asimismo, debe soportar patrones de paralelización dinámica (\textit{Dynamic Task Mapping}) para dividir cargas en $N$ subtareas en tiempo de ejecución en función del volumen real recibido.
+
+\textbf{Caso operativo (Plataforma de streaming de contenidos):} una plataforma de vídeo bajo demanda expande su base de usuarios de 500\,000 a 15 millones. Su motor de recomendaciones necesita recalcular matrices de afinidad y actualizar índices de catálogo para millones de perfiles concurrentes. Gracias a una arquitectura de workers elásticos (por ejemplo, escalados con KEDA sobre Kubernetes) y a la delegación del cálculo masivo en clústeres Spark efímeros, el orquestador absorbe picos de 30 veces la carga original sin rediseñar la definición lógica del flujo.
+
+\subsection{Pilar 6: Control de versiones (Version Control)}\label{subsec:pilar-versionado}
+
+Los flujos de trabajo son software de producción y deben gobernarse con el mismo rigor que cualquier microservicio crítico. El principio \textbf{\textit{Workflows-as-Code}} implica que toda definición de pipeline, configuración de alertas y contrato de dependencias reside en un repositorio Git. Esto habilita:
+\begin{itemize}
+  \item \textbf{Revisión por pares (\textit{Pull Requests}):} auditoría previa de cambios en lógica, consultas SQL y políticas de reintento.
+  \item \textbf{Integración y despliegue continuos (CI/CD):} ejecución automática de \textit{linters}, pruebas unitarias, validación de sintaxis de DAGs (sin ciclos ni errores de importación) y despliegue automatizado por entornos (\textit{dev} $\to$ \textit{staging} $\to$ \textit{prod}).
+  \item \textbf{Reproducibilidad y \textit{rollback} rápido:} capacidad de identificar exactamente qué versión del código generó los datos de una fecha pasada y revertir de inmediato ante una regresión.
+\end{itemize}
+
+\textbf{Caso operativo (Equipo financiero):} el área de finanzas actualiza un workflow de proyección trimestral de ingresos para incorporar una nueva regla fiscal. Tras desplegar la nueva versión en producción, las pruebas automáticas de conciliación detectan una desviación del $1{,}8\%$ en las filiales europeas. Al estar el pipeline versionado en Git (y con soporte de versionado nativo en Airflow 3), el equipo revierte a la última etiqueta estable en cuestión de minutos para garantizar el cierre diario mientras depura la rama fallida en un entorno aislado.
+
+\subsection{Pilar 7: Gestión de errores y resiliencia (Error Handling)}\label{subsec:pilar-errores}
+
+En sistemas distribuidos a gran escala, el fallo no es una anomalía excepcional sino un evento cotidiano: cortes transitorios de red, expiración de tokens, respuestas HTTP \code{429 Too Many Requests} o \code{503 Service Unavailable}, reinicios de nodos \textit{spot} en la nube o cambios imprevistos en el formato de un fichero externo. Un orquestador robusto debe distinguir entre \textbf{errores transitorios} (recuperables mediante reintento) y \textbf{errores permanentes} (bugs de código o violaciones de contrato que requieren intervención humana o ruta alternativa).
+
+Las cuatro técnicas clave de resiliencia son:
+\begin{enumerate}
+  \item \textbf{Reintentos con retroceso exponencial y aleatoriedad (\textit{exponential backoff with jitter}):} evita el efecto de ``estampida'' (\textit{thundering herd}) sobre un servicio ya saturado espaciando cada intento $k \in \{0, 1, 2, \dots\}$ según:
+  \begin{equation}\label{eq:backoff-jitter}
+    \Delta t_k = \min\!\left(t_{\max},\; t_0 \cdot 2^{k}\right) + \epsilon_k, \qquad \epsilon_k \sim \mathcal{U}(0, \sigma_k)
+  \end{equation}
+  donde $t_0$ es la espera base, $t_{\max}$ la cota superior y $\epsilon_k$ una perturbación aleatoria uniforme.
+  \item \textbf{Rutas de respaldo (\textit{fallbacks}) y ramificación condicional:} activar una fuente secundaria, un modelo de reserva o una caché verificada cuando el proveedor principal agota sus reintentos.
+  \item \textbf{Cuarentena y colas de mensajes muertos (\textit{dead-letter queues/tables}):} aislar registros defectuosos para no paralizar todo el lote, permitiendo su inspección y reprocesamiento posterior.
+  \item \textbf{Idempotencia y \textit{callbacks} de recuperación:} garantizar que reintentar una tarea nunca genere registros duplicados ni efectos colaterales inconsistentes, y ejecutar rutinas automáticas de limpieza (\textit{teardown}) si un flujo aborta a mitad de ejecución.
+\end{enumerate}
+
+\textbf{Caso operativo (API meteorológica con \textit{fallback}):} una plataforma logística de distribución en frío consulta cada hora una API meteorológica principal para predecir retrasos por tormentas y ajustar rutas. Si la petición falla por indisponibilidad temporal, el orquestador aplica tres reintentos con retroceso exponencial ($30\,\text{s}$, $60\,\text{s}$, $120\,\text{s}$ con \textit{jitter}). Si el tercer intento fracasa, una regla de disparo activa automáticamente una rama alternativa que consulta una API meteorológica de respaldo, marca el evento con una alerta de severidad media para el equipo de operaciones y permite que el cálculo de rutas concluya dentro de SLA.
+
+\begin{lstlisting}[style=python, caption={Patrón conceptual de política de reintento con retroceso exponencial y ruta de respaldo (\textit{fallback}) para una API meteorológica.}, label={lst:fallback-pattern}]
+import random
+import time
+from typing import Any, Callable
+
+
+def ejecutar_con_backoff(
+    fn_principal: Callable[[], dict[str, Any]],
+    fn_respaldo: Callable[[], dict[str, Any]],
+    max_reintentos: int = 3,
+    espera_base_seg: float = 30.0,
+    espera_max_seg: float = 300.0,
+) -> dict[str, Any]:
+    """Ejecuta una llamada externa con exponential backoff + jitter y fallback."""
+    ultimo_error: Exception | None = None
+
+    for intento in range(max_reintentos):
+        try:
+            return fn_principal()
+        except (TimeoutError, ConnectionError) as exc:
+            ultimo_error = exc
+            if intento < max_reintentos - 1:
+                espera = min(espera_max_seg, espera_base_seg * (2 ** intento))
+                jitter = random.uniform(0.0, espera * 0.2)
+                time.sleep(espera + jitter)
+
+    # Si se agotan los reintentos transitorios, se conmuta al proveedor de respaldo
+    datos_respaldo = fn_respaldo()
+    datos_respaldo["_metadata"] = {
+        "origen": "api_respaldo",
+        "motivo_fallback": str(ultimo_error),
+    }
+    return datos_respaldo
+\end{lstlisting}
+
+% ============================================================================
+\section{Panorama del mercado de orquestadores (2025--2026)}\label{sec:mercado-orquestadores}
+% ============================================================================
+
+Aunque Apache Airflow domina ampliamente el mercado desde hace casi una década, el ecosistema de orquestación ha madurado y se ha diversificado notablemente. Conocer las fortalezas, filosofías de diseño y limitaciones de las principales alternativas resulta esencial para tomar decisiones de arquitectura fundamentadas y no forzar una herramienta fuera de su dominio óptimo.
+
+\subsection{Análisis técnico de las plataformas principales}\label{subsec:analisis-plataformas}
+
+\begin{description}
+  \item[Apache Airflow:] es el \textbf{estándar \textit{de facto} \textit{open-source}} (licencia Apache 2.0) para orquestación de datos. Sus flujos se definen en código Python (DAGs y TaskFlow API), cuenta con una interfaz web consolidada y el ecosistema de conectores más amplio de la industria (más de 90 paquetes oficiales de \textit{providers}). Históricamente enfocado en tareas (\textit{task-centric}) y planificación temporal, su evolución hacia \textbf{Airflow 3.0+} (2025--2026) ha cerrado las brechas frente a competidores recientes al incorporar aislamiento de ejecución mediante Task Execution API, versionado nativo de DAGs, programación orientada a \textit{Assets} y soporte multi-lenguaje. Cuenta además con ofertas gestionadas de primer nivel en todas las nubes (Astronomer, Google Cloud Composer, Amazon MWAA).
+
+  \item[Dagster:] el competidor \textit{open-source} (licencia Apache 2.0 en el núcleo, con plataforma comercial Dagster+) más sólido desde el punto de vista de la ingeniería de datos moderna. Su propuesta diferencial son los \textbf{\textit{Software-Defined Assets} (SDA)}: en lugar de modelar únicamente qué tarea se ejecuta después de cuál, el desarrollador declara qué activos de datos (tablas, ficheros, modelos) deben existir, de qué otros activos dependen y cómo materializarlos. Destaca por su tipado fuerte, excelente ergonomía para pruebas unitarias locales, integración nativa con \pkg{dbt}, linaje de metadatos rico y políticas declarativas de frescura (\textit{auto-materialization}). Su ecosistema de conectores de terceros, aunque creciente, es menor que el de Airflow.
+
+  \item[Prefect:] adopta una filosofía marcadamente \textbf{\textit{Pythonic} y dinámica}. Cualquier función Python puede convertirse en un flujo o tarea mediante decoradores simples (\code{@flow}, \code{@task}), permitiendo bucles, condicionales dinámicos y ejecución imperativa natural sin la rigidez estructural de los DAGs estáticos. Reduce la fricción inicial para equipos pequeños centrados en Python y ciencia de datos. Sin embargo, su plano de control gestionado más completo depende de su oferta comercial (Prefect Cloud) y su modelo de licenciamiento en componentes empresariales es más restrictivo que el gobierno comunitario de la Apache Software Foundation.
+
+  \item[Apache NiFi:] pertenece a una categoría complementaria conocida como \textbf{programación basada en flujos (\textit{Flow-Based Programming})}. Proporciona una interfaz visual de arrastrar y soltar donde procesadores especializados intercambian paquetes de datos denominados \textit{FlowFiles} en tiempo real, con control visual de colas, \textit{backpressure} y una trazabilidad excepcional a nivel de evento individual (\textit{data provenance}). Sobresale en movimiento continuo, enrutamiento, filtrado y transformación ligera de flujos IoT o logs; por el contrario, no es la herramienta adecuada para gestionar complejos grafos analíticos \textit{batch}, \textit{backfills} históricos ni ciclos de entrenamiento de ML.
+
+  \item[Kubeflow Pipelines (KFP):] plataforma \textit{open-source} nativa de Kubernetes diseñada específicamente para \textbf{flujos de trabajo de Machine Learning}. Cada paso es un contenedor aislado con entradas y salidas tipadas (datasets, métricas, modelos) y gestión nativa de aceleradores (GPU/TPU). Es potente en organizaciones con equipos MLOps expertos en Kubernetes, pero su curva operativa, la sobrecarga de mantener Kubeflow y su escasa orientación hacia el ETL generalista hacen que muchos equipos prefieran combinar Airflow o Argo con MLflow.
+
+  \item[Argo Workflows:] motor \textit{open-source} \textit{cloud-native} (CNCF Graduated) para ejecutar DAGs de contenedores directamente como recursos personalizados (CRDs) en Kubernetes, definidos declarativamente en YAML (o generados con SDKs como Hera). Ofrece un paralelismo masivo extraordinario, huella mínima y excelente encaje en entornos GitOps e infraestructura CI/CD (de hecho, sirve como motor subyacente de Kubeflow Pipelines v2). Como contrapartida, carece de serie de funcionalidades específicas de datos presentes en Airflow o Dagster (calendarios complejos de datos, gestión de conexiones/hooks analíticos, vistas de frescura de tablas).
+
+  \item[Alternativas emergentes (Kestra y Mage):] en los últimos años han ganado tracción nichos específicos como \textbf{Kestra} (orquestador declarativo \textit{YAML-first} muy orientado a eventos, poliglota y con excelente experiencia visual) y \textbf{Mage} (enfoque modular estilo \textit{notebook} interactivo orientado a prototipado rápido en equipos reducidos).
+
+  \item[Servicios gestionados en la nube:] los grandes hiperescaladores ofrecen dos familias de soluciones:
+  \begin{itemize}
+    \item \textbf{Airflow totalmente gestionado:} \textbf{Google Cloud Composer} y \textbf{Amazon MWAA} (\textit{Managed Workflows for Apache Airflow}) eliminan la administración de infraestructura manteniendo compatibilidad con el ecosistema Airflow, aunque con cierto desfase temporal respecto a las versiones más recientes y menor flexibilidad de personalización profunda.
+    \item \textbf{Orquestadores propietarios nativos:} \textbf{Azure Data Factory (ADF)} ofrece integración visual \textit{low-code} muy afinada para ETL dentro del ecosistema Azure/Microsoft Fabric, pero introduce fuerte acoplamiento al proveedor (\textit{vendor lock-in}) y menor expresividad que el código Python. \textbf{AWS Step Functions} implementa máquinas de estados \textit{serverless} (en JSON/ASL) capaces de escalar a decenas de miles de transiciones por segundo con coste por transición; brilla orquestando microservicios, funciones Lambda y trabajos AWS Batch/Glue, pero resulta incómodo para expresar complejos \textit{backfills} analíticos o dependencias sobre calendarios de datos.
+  \end{itemize}
+\end{description}
+
+\subsection{Matriz comparativa del ecosistema}\label{subsec:matriz-orquestadores}
+
+La Tabla~\ref{tab:comparativa-orquestadores} resume las capacidades comparativas de las principales soluciones del mercado en 2025--2026. Los símbolos indican soporte nativo completo (\yesmark), soporte parcial o mediante extensiones (\partialmark) y ausencia o no aplicabilidad directa (\nomark).
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa técnica de orquestadores de datos y workflows en el mercado (2025--2026). Leyenda: \yesmark\ soporte completo, \partialmark\ soporte parcial/extensión, \nomark\ no aplica o muy limitado.}
+\label{tab:comparativa-orquestadores}
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}L{2.35cm} L{2.15cm} L{2.35cm} C{1.2cm} C{1.15cm} C{1.15cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Plataforma} &
+\textcolor{white}{\sffamily\bfseries Licencia / Modelo} &
+\textcolor{white}{\sffamily\bfseries Paradigma y Autoría} &
+\textcolor{white}{\sffamily\bfseries Conect.} &
+\textcolor{white}{\sffamily\bfseries K8s / ML} &
+\textcolor{white}{\sffamily\bfseries Data Assets} &
+\textcolor{white}{\sffamily\bfseries Caso de uso ideal} \\
+\midrule
+\textbf{Apache Airflow} (2.10 / 3.0+) & Open-source (Apache 2.0) / Gestionado & DAGs Python, TaskFlow, Assets & \yesmark & \yesmark & \yesmark & Estándar generalista ETL/ELT, MLOps y plataformas multi-cloud. \\
+\rowcolor{TableStripe}
+\textbf{Dagster} & Open-source (Apache 2.0) / Dagster+ & Asset-centric (SDA), Python tipado & \partialmark & \yesmark & \yesmark & Plataformas centradas en calidad, linaje, dbt y pruebas rigurosas. \\
+\textbf{Prefect} & Open-source core / Cloud comercial & Imperativo dinámico en Python & \partialmark & \partialmark & \partialmark & Equipos Python ágiles, flujos dinámicos y ciencia de datos. \\
+\rowcolor{TableStripe}
+\textbf{Apache NiFi} & Open-source (Apache 2.0) & Flow-Based visual (FlowFiles) & \yesmark & \nomark & \nomark & Movimiento continuo en tiempo real, IoT, enrutamiento y procedencia. \\
+\textbf{Kubeflow Pipelines} & Open-source (Apache 2.0) & Contenedores DAG (Python SDK $\to$ YAML) & \nomark & \yesmark & \partialmark & Pipelines ML pesados con GPU 100\% centrados en Kubernetes. \\
+\rowcolor{TableStripe}
+\textbf{Argo Workflows} & Open-source (CNCF / Apache 2.0) & Contenedores CRD YAML-first & \nomark & \yesmark & \nomark & Paralelismo masivo de contenedores, CI/CD GitOps y cómputo científico. \\
+\textbf{Kestra} & Open-source (Apache 2.0) / Enterprise & Declarativo YAML, event-driven & \yesmark & \partialmark & \partialmark & Automatización poliglota orientada a eventos y baja barrera inicial. \\
+\rowcolor{TableStripe}
+\textbf{Cloud Composer / MWAA} & Gestionado SaaS (GCP / AWS) & Airflow gestionado en la nube & \yesmark & \yesmark & \yesmark & Empresas que desean Airflow sin operar el plano de control. \\
+\textbf{Azure Data Factory} & Propietario cloud (Azure) & Visual low-code / JSON pipelines & \yesmark & \partialmark & \nomark & Integración de datos corporativa 100\% en ecosistema Microsoft Azure. \\
+\rowcolor{TableStripe}
+\textbf{AWS Step Functions} & Propietario serverless (AWS) & Máquinas de estados (ASL/JSON) & \partialmark & \partialmark & \nomark & Orquestación serverless de microservicios y tareas AWS a alta frecuencia. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Guía práctica de selección arquitectónica}\label{subsec:guia-seleccion}
+
+Al seleccionar un orquestador para un proyecto real, el criterio decisivo no es la moda tecnológica, sino el ajuste entre el perfil de las cargas de trabajo, la madurez del equipo y las restricciones de gobernanza:
+
+\begin{examplebox}[Heurística de decisión para elegir orquestador]
+\begin{itemize}
+  \item \textbf{Elija Apache Airflow (preferiblemente 3.0+ en proyectos nuevos)} si necesita un plano de control consolidado y multi-cloud con conectividad inmediata a decenas de sistemas heterogéneos, facilidad para contratar talento formado en el mercado, soporte robusto de \textit{backfills}, SLAs y convivencia de ETL, MLOps y LLMOps.
+  \item \textbf{Considere Dagster} si construye una plataforma analítica desde cero muy acoplada a \pkg{dbt} y al modelado de activos de datos, donde el tipado estricto, el desarrollo local sin fricción y la trazabilidad por activo sean la prioridad absoluta.
+  \item \textbf{Opte por Argo Workflows o Kubeflow Pipelines} cuando toda su carga consista en contenedores pesados (entrenamiento profundo en GPU, simulaciones científicas, bioinformática) sobre un clúster Kubernetes ya operado por un equipo SRE especializado.
+  \item \textbf{Utilice Apache NiFi} para ingesta y enrutamiento continuo evento a evento (p. ej., telemetría de red, integración con sistemas industriales) complementando ---no sustituyendo--- al orquestador analítico \textit{batch}.
+  \item \textbf{Recurra a servicios gestionados (Cloud Composer, MWAA, Astronomer, ADF o Step Functions)} cuando el equipo de plataforma sea reducido y el coste de oportunidad de administrar servidores, bases de datos y parches de seguridad supere el margen de licencia gestionada.
+\end{itemize}
+\end{examplebox}
+
+\begin{modernbox}[Convergencia del mercado en 2025--2026: Assets, OpenLineage e IA]
+La competencia saludable entre Apache Airflow, Dagster, Prefect y Kestra ha impulsado una notable convergencia arquitectónica en toda la industria:
+\begin{itemize}
+  \item \textbf{Orquestación centrada en datos (\textit{Asset-Centric}):} el modelo iniciado por Dagster ha permeado en Airflow 3.0+, donde los \textit{Assets} y el álgebra reactiva sobre activos conviven de forma natural con el grafo clásico de tareas.
+  \item \textbf{Linaje abierto estandarizado (\pkg{OpenLineage}):} los orquestadores modernos emiten eventos estandarizados de entrada/salida y esquema a catálogos como Marquez, DataHub o OpenMetadata, haciendo visible el impacto de un cambio aguas arriba en segundos.
+  \item \textbf{Aislamiento y cargas de IA generativa:} los pipelines actuales no solo mueven tablas SQL; orquestan indexación vectorial para sistemas RAG, lotes de inferencia LLM con control de costes y evaluaciones automáticas (Capítulos 8 a 10), lo que exige ejecución aislada por entorno y soporte poliglota.
+\end{itemize}
+\end{modernbox}
+
+Con los fundamentos teóricos de \textit{streaming} frente a \textit{batch}, la Arquitectura Medallion, los siete pilares y el mapa del mercado firmemente establecidos, el Capítulo~\ref{chap:airflow-arquitectura} disecciona la arquitectura interna de Apache Airflow ---tanto su estándar consolidado 2.10 como la transformación estructural introducida en Airflow 3.0+--- junto con sus modelos de ejecución y patrones de despliegue en producción.

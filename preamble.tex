@@ -1,0 +1,457 @@
+% ============================================================================
+% preamble.tex — Estilo editorial unificado para el Manual Técnico
+% Orquestación de Datos, MLOps y LLMOps: Apache Airflow y MLflow
+% Compatible con Tectonic / XeLaTeX / LuaLaTeX
+% ============================================================================
+
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[utf8]{inputenc}
+  \usepackage[T1]{fontenc}
+  \usepackage{tgpagella}
+  \usepackage{tgheros}
+  \usepackage{inconsolata}
+\else
+  \usepackage{fontspec}
+  \setmainfont{texgyrepagella}[
+    Extension = .otf,
+    UprightFont = *-regular,
+    BoldFont = *-bold,
+    ItalicFont = *-italic,
+    BoldItalicFont = *-bolditalic
+  ]
+  \setsansfont{texgyreheros}[
+    Scale=0.92,
+    Extension = .otf,
+    UprightFont = *-regular,
+    BoldFont = *-bold,
+    ItalicFont = *-italic,
+    BoldItalicFont = *-bolditalic
+  ]
+  \setmonofont{lmmono10}[
+    Scale=0.88,
+    Extension = .otf,
+    UprightFont = *-regular,
+    ItalicFont = *-italic,
+    AutoFakeBold = 1.6
+  ]
+\fi
+
+% Localización en español (Tabla en vez de Cuadro; punto decimal en matemáticas; sin shorthands activos para evitar conflictos con TikZ y comillas en \code{})
+\usepackage[spanish,es-tabla,es-nodecimaldot,es-noquoting,es-noshorthands]{babel}
+\addto\captionsspanish{%
+  \renewcommand{\lstlistingname}{Listado}%
+  \renewcommand{\lstlistlistingname}{Índice de Listados de Código}%
+}
+\usepackage{csquotes}
+\usepackage{microtype}
+
+% Geometría de página A4 optimizada para manual técnico de referencia
+\usepackage[
+  a4paper,
+  top=2.0cm,
+  bottom=2.0cm,
+  left=1.9cm,
+  right=1.9cm,
+  headheight=15pt,
+  headsep=14pt,
+  footskip=22pt
+]{geometry}
+
+% Espaciado editorial moderno compacto y legible
+\linespread{1.05}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4.5pt}
+\widowpenalty=10000
+\clubpenalty=10000
+\sloppy
+
+% Matemáticas
+\usepackage{amsmath, amssymb, mathtools}
+
+% Colores corporativos / editoriales
+\usepackage[table,dvipsnames,svgnames]{xcolor}
+\definecolor{PrimaryDark}{HTML}{0B2545}
+\definecolor{PrimaryAccent}{HTML}{134074}
+\definecolor{SecondaryBlue}{HTML}{1D5B9E}
+\definecolor{TealAccent}{HTML}{0E7C7B}
+\definecolor{AmberAccent}{HTML}{B45309}
+\definecolor{CrimsonAccent}{HTML}{991B1B}
+\definecolor{EmeraldAccent}{HTML}{047857}
+\definecolor{SlateText}{HTML}{1E293B}
+\definecolor{MutedGray}{HTML}{64748B}
+\definecolor{LightBorder}{HTML}{CBD5E1}
+\definecolor{SoftBg}{HTML}{F8FAFC}
+\definecolor{InfoBg}{HTML}{EFF6FF}
+\definecolor{WarnBg}{HTML}{FFFBEB}
+\definecolor{ModernBg}{HTML}{F0FDFA}
+\definecolor{ExampleBg}{HTML}{F8FAFC}
+\definecolor{TableHeaderBg}{HTML}{0B2545}
+\definecolor{TableStripe}{HTML}{F1F5F9}
+
+% Código (colores de sintaxis)
+\definecolor{CodeBg}{HTML}{F8FAFC}
+\definecolor{CodeFrame}{HTML}{CBD5E1}
+\definecolor{CodeKeyword}{HTML}{1D4ED8}
+\definecolor{CodeString}{HTML}{047857}
+\definecolor{CodeComment}{HTML}{64748B}
+\definecolor{CodeNumber}{HTML}{94A3B8}
+\definecolor{CodeIdentifier}{HTML}{0F172A}
+\definecolor{CodeDecorator}{HTML}{7C3AED}
+
+\color{SlateText}
+
+% Gráficos, tablas, listas y flotantes
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{makecell}
+\usepackage{enumitem}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{pdflscape}
+\usepackage{adjustbox}
+\usepackage{pifont}
+
+% Columnas personalizadas para tabularx
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{R}[1]{>{\raggedleft\arraybackslash}p{#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+% Listas compactas y limpias
+\setlist[itemize]{topsep=4pt, itemsep=2.5pt, parsep=0pt, leftmargin=1.5em, label=\textcolor{PrimaryAccent}{\tiny$\blacksquare$}}
+\setlist[enumerate]{topsep=4pt, itemsep=2.5pt, parsep=0pt, leftmargin=1.8em}
+\setlist[description]{topsep=4pt, itemsep=3pt, style=nextline, font=\sffamily\bfseries\color{PrimaryDark}}
+
+% Captions estilizados
+\captionsetup{
+  font={small,sf},
+  labelfont={bf,color=PrimaryDark},
+  textfont={color=SlateText},
+  margin=8pt,
+  skip=8pt
+}
+
+% TikZ y PGFPlots
+\usepackage{tikz}
+\usetikzlibrary{
+  babel,
+  arrows.meta,
+  positioning,
+  shapes.geometric,
+  shapes.multipart,
+  shapes.symbols,
+  fit,
+  backgrounds,
+  calc,
+  shadows,
+  decorations.pathreplacing,
+  matrix
+}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+% Estilos TikZ reutilizables en todos los capítulos
+\tikzset{
+  >=Stealth,
+  archbox/.style={
+    rectangle, rounded corners=4pt, draw=PrimaryAccent, line width=0.9pt,
+    fill=InfoBg, text=PrimaryDark, font=\sffamily\footnotesize\bfseries,
+    align=center, minimum height=0.85cm, inner sep=6pt, drop shadow={opacity=0.12}
+  },
+  tealbox/.style={
+    rectangle, rounded corners=4pt, draw=TealAccent, line width=0.9pt,
+    fill=ModernBg, text=PrimaryDark, font=\sffamily\footnotesize\bfseries,
+    align=center, minimum height=0.85cm, inner sep=6pt, drop shadow={opacity=0.12}
+  },
+  amberbox/.style={
+    rectangle, rounded corners=4pt, draw=AmberAccent, line width=0.9pt,
+    fill=WarnBg, text=PrimaryDark, font=\sffamily\footnotesize\bfseries,
+    align=center, minimum height=0.85cm, inner sep=6pt, drop shadow={opacity=0.12}
+  },
+  darkbox/.style={
+    rectangle, rounded corners=4pt, draw=PrimaryDark, line width=1pt,
+    fill=PrimaryDark, text=white, font=\sffamily\footnotesize\bfseries,
+    align=center, minimum height=0.85cm, inner sep=6pt, drop shadow={opacity=0.15}
+  },
+  subbox/.style={
+    rectangle, rounded corners=3pt, draw=LightBorder, line width=0.7pt,
+    fill=white, text=SlateText, font=\sffamily\scriptsize,
+    align=center, minimum height=0.65cm, inner sep=5pt
+  },
+  dbnode/.style={
+    cylinder, shape border rotate=90, aspect=0.28,
+    draw=PrimaryAccent, line width=0.9pt, fill=InfoBg,
+    text=PrimaryDark, font=\sffamily\footnotesize\bfseries,
+    align=center, minimum height=1.0cm, minimum width=1.6cm, inner sep=4pt
+  },
+  groupbox/.style={
+    rectangle, rounded corners=6pt, draw=MutedGray, dashed, line width=0.8pt,
+    fill=SoftBg, inner sep=10pt
+  },
+  flowarrow/.style={
+    -{Stealth[length=6pt, width=4.5pt]}, line width=1pt, color=PrimaryAccent
+  },
+  tealarrow/.style={
+    -{Stealth[length=6pt, width=4.5pt]}, line width=1pt, color=TealAccent
+  },
+  dashedarrow/.style={
+    -{Stealth[length=5.5pt, width=4pt]}, dashed, line width=0.9pt, color=MutedGray
+  },
+  elabel/.style={
+    font=\sffamily\scriptsize, text=MutedGray, fill=white, inner sep=2pt
+  }
+}
+
+% Tcolorbox para cajas editoriales
+\usepackage[most]{tcolorbox}
+\tcbuselibrary{breakable, skins}
+
+\newtcolorbox{infobox}[1][Concepto clave]{
+  enhanced, breakable,
+  colback=InfoBg, colframe=PrimaryAccent,
+  coltitle=PrimaryDark, fonttitle=\sffamily\bfseries\small,
+  title={#1},
+  attach title to upper={\par\vspace{3pt}},
+  boxrule=0pt, leftrule=3.5pt, arc=2pt,
+  left=10pt, right=10pt, top=8pt, bottom=8pt,
+  before skip=10pt, after skip=10pt,
+  borderline west={3.5pt}{0pt}{PrimaryAccent}
+}
+
+\newtcolorbox{warningbox}[1][Advertencia de producción]{
+  enhanced, breakable,
+  colback=WarnBg, colframe=AmberAccent,
+  coltitle=AmberAccent, fonttitle=\sffamily\bfseries\small,
+  title={#1},
+  attach title to upper={\par\vspace{3pt}},
+  boxrule=0pt, leftrule=3.5pt, arc=2pt,
+  left=10pt, right=10pt, top=8pt, bottom=8pt,
+  before skip=10pt, after skip=10pt,
+  borderline west={3.5pt}{0pt}{AmberAccent}
+}
+
+\newtcolorbox{modernbox}[1][Modernización 2025--2026]{
+  enhanced, breakable,
+  colback=ModernBg, colframe=TealAccent,
+  coltitle=TealAccent, fonttitle=\sffamily\bfseries\small,
+  title={#1},
+  attach title to upper={\par\vspace{3pt}},
+  boxrule=0pt, leftrule=3.5pt, arc=2pt,
+  left=10pt, right=10pt, top=8pt, bottom=8pt,
+  before skip=10pt, after skip=10pt,
+  borderline west={3.5pt}{0pt}{TealAccent}
+}
+
+\newtcolorbox{examplebox}[1][Caso práctico]{
+  enhanced, breakable,
+  colback=ExampleBg, colframe=PrimaryDark,
+  coltitle=white, fonttitle=\sffamily\bfseries\small,
+  title={#1},
+  boxrule=0.6pt, arc=3pt,
+  colbacktitle=PrimaryDark,
+  left=10pt, right=10pt, top=8pt, bottom=8pt,
+  toptitle=4pt, bottomtitle=4pt,
+  before skip=10pt, after skip=10pt
+}
+
+% Listings (bloques de código con soporte UTF-8 completo para comentarios en español)
+\usepackage{listings}
+
+\lstdefinelanguage{YAML}{
+  keywords={true,false,null,y,n,yes,no,on,off},
+  keywordstyle=\color{CodeKeyword}\bfseries,
+  basicstyle=\ttfamily\footnotesize,
+  sensitive=false,
+  comment=[l]{\#},
+  morecomment=[s]{/*}{*/},
+  commentstyle=\color{CodeComment}\itshape,
+  stringstyle=\color{CodeString},
+  moredelim=[l][\color{CodeDecorator}]{\&},
+  moredelim=[l][\color{CodeDecorator}]{*},
+  moredelim=**[il][\color{PrimaryAccent}\bfseries{:}\color{CodeIdentifier}]{:},
+  morestring=[b]',
+  morestring=[b]"
+}
+
+\lstdefinelanguage{JSON}{
+  string=[s]{"}{"},
+  stringstyle=\color{CodeString},
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  commentstyle=\color{CodeComment}\itshape,
+  keywords={true,false,null},
+  keywordstyle=\color{CodeKeyword}\bfseries
+}
+
+\lstdefinelanguage{Dockerfile}{
+  keywords={FROM,RUN,CMD,LABEL,EXPOSE,ENV,ADD,COPY,ENTRYPOINT,VOLUME,USER,WORKDIR,ARG,ONBUILD,HEALTHCHECK,SHELL,AS},
+  keywordstyle=\color{CodeKeyword}\bfseries,
+  comment=[l]{\#},
+  commentstyle=\color{CodeComment}\itshape,
+  string=[b]",
+  morestring=[b]',
+  stringstyle=\color{CodeString}
+}
+
+\lstset{
+  backgroundcolor=\color{CodeBg},
+  basicstyle=\ttfamily\scriptsize\color{CodeIdentifier},
+  keywordstyle=\color{CodeKeyword}\bfseries,
+  stringstyle=\color{CodeString},
+  commentstyle=\color{CodeComment}\itshape,
+  numberstyle=\tiny\sffamily\color{CodeNumber},
+  numbers=left,
+  numbersep=7pt,
+  stepnumber=1,
+  frame=single,
+  rulecolor=\color{CodeFrame},
+  framerule=0.6pt,
+  framesep=4pt,
+  xleftmargin=12pt,
+  xrightmargin=4pt,
+  aboveskip=7pt,
+  belowskip=7pt,
+  breaklines=true,
+  breakatwhitespace=false,
+  postbreak=\mbox{\textcolor{MutedGray}{$\hookrightarrow$}\space},
+  tabsize=4,
+  showstringspaces=false,
+  keepspaces=true,
+  columns=fullflexible,
+  captionpos=t,
+  upquote=true,
+  literate=
+    {á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1
+    {Á}{{\'A}}1 {É}{{\'E}}1 {Í}{{\'I}}1 {Ó}{{\'O}}1 {Ú}{{\'U}}1
+    {ñ}{{\~n}}1 {Ñ}{{\~N}}1 {ü}{{\"u}}1 {Ü}{{\"U}}1
+    {¿}{{?`}}1 {¡}{{!`}}1
+    {—}{{---}}1 {–}{{--}}1
+    {→}{{$\rightarrow$}}1 {←}{{$\leftarrow$}}1 {↔}{{$\leftrightarrow$}}1
+    {≤}{{$\le$}}1 {≥}{{$\ge$}}1 {≠}{{$\ne$}}1 {×}{{$\times$}}1
+    {€}{{\texteuro}}1
+}
+
+\lstdefinestyle{python}{
+  language=Python,
+  morekeywords={as,with,yield,async,await,True,False,None,match,case,Literal},
+  emph={@dag,@task,@task_group,@mlflow,@scorer,DAG,PythonOperator,BashOperator,SQLExecuteQueryOperator,HttpOperator,KubernetesPodOperator,DockerOperator,ObjectStoragePath,Asset,Dataset,MlflowClient,ResponsesAgent,BaseHook,BaseOperator,BaseTrigger},
+  emphstyle=\color{CodeDecorator}\bfseries
+}
+\lstdefinestyle{bash}{
+  language=Bash,
+  morekeywords={airflow,mlflow,pip,python3,docker,kubectl,helm,curl,export,source,pytest,git,uv}
+}
+\lstdefinestyle{sql}{
+  language=SQL,
+  morekeywords={MERGE,USING,MATCHED,CONFLICT,EXCLUDED,RETURNING,PARTITION,OVER,QUALIFY,COPY,INTO,STAGE,LATERAL,JSONB,VECTOR}
+}
+\lstdefinestyle{yaml}{language=YAML}
+\lstdefinestyle{json}{language=JSON}
+\lstdefinestyle{docker}{language=Dockerfile}
+
+% Títulos de Partes, Capítulos y Secciones (titlesec)
+\usepackage{titlesec}
+
+\titleformat{\part}[display]
+  {\thispagestyle{empty}\centering\sffamily\bfseries}
+  {\vspace*{2cm}\colorbox{PrimaryDark}{\parbox{0.35\textwidth}{\centering\color{white}\large\vspace{4pt}PARTE \thepart\vspace{4pt}}}}
+  {20pt}
+  {\Huge\color{PrimaryDark}}
+  [\vspace{12pt}{\color{TealAccent}\rule{0.55\textwidth}{2.5pt}}\vspace{1cm}]
+
+\titleformat{\chapter}[display]
+  {\sffamily\bfseries}
+  {\filleft\fontsize{13}{15}\selectfont\textcolor{TealAccent}{\MakeUppercase{\chaptertitlename}}\hspace{6pt}\colorbox{PrimaryDark}{\textcolor{white}{\fontsize{22}{24}\selectfont\hspace{6pt}\thechapter\hspace{6pt}}}}
+  {8pt}
+  {\fontsize{21}{25}\selectfont\color{PrimaryDark}\raggedright}
+  [\vspace{4pt}{\color{PrimaryAccent}\titlerule[1.5pt]}\vspace{8pt}]
+
+\titlespacing*{\chapter}{0pt}{-15pt}{18pt}
+
+\titleformat{\section}
+  {\sffamily\bfseries\Large\color{PrimaryDark}}
+  {\textcolor{PrimaryAccent}{\thesection}}{0.7em}{}
+  [\vspace{-2pt}{\color{LightBorder}\titlerule[0.5pt]}]
+\titlespacing*{\section}{0pt}{18pt}{8pt}
+
+\titleformat{\subsection}
+  {\sffamily\bfseries\large\color{PrimaryAccent}}
+  {\thesubsection}{0.6em}{}
+\titlespacing*{\subsection}{0pt}{14pt}{5pt}
+
+\titleformat{\subsubsection}
+  {\sffamily\bfseries\normalsize\color{TealAccent}}
+  {\thesubsubsection}{0.5em}{}
+\titlespacing*{\subsubsection}{0pt}{10pt}{3pt}
+
+% Cabeceras y pies de página (fancyhdr)
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\chaptermark}[1]{\markboth{\thechapter.\ #1}{}}
+\renewcommand{\sectionmark}[1]{\markright{\thesection\ #1}}
+\fancyhead[L]{\sffamily\scriptsize\color{MutedGray}\nouppercase{\leftmark}}
+\fancyhead[R]{\sffamily\scriptsize\color{MutedGray}\nouppercase{\rightmark}}
+\fancyfoot[L]{\sffamily\footnotesize\color{MutedGray}Manual Técnico: Apache Airflow y MLflow (MLOps \& LLMOps)}
+\fancyfoot[R]{\sffamily\footnotesize\bfseries\color{PrimaryDark}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{LightBorder}\leaders\hrule height \headrulewidth\hfill}}
+\renewcommand{\footrulewidth}{0.4pt}
+\renewcommand{\footrule}{\hbox to\headwidth{\color{LightBorder}\leaders\hrule height \footrulewidth\hfill}}
+
+\fancypagestyle{plain}{
+  \fancyhf{}
+  \fancyfoot[L]{\sffamily\footnotesize\color{MutedGray}Manual Técnico: Apache Airflow y MLflow (MLOps \& LLMOps)}
+  \fancyfoot[R]{\sffamily\footnotesize\bfseries\color{PrimaryDark}\thepage}
+  \renewcommand{\headrulewidth}{0pt}
+  \renewcommand{\footrulewidth}{0.4pt}
+}
+
+% Tabla de contenidos estilizada
+\usepackage{tocloft}
+\renewcommand{\cftpartfont}{\sffamily\bfseries\large\color{PrimaryDark}}
+\renewcommand{\cftchapfont}{\sffamily\bfseries\color{PrimaryAccent}}
+\renewcommand{\cftsecfont}{\sffamily\small\color{SlateText}}
+\renewcommand{\cftsubsecfont}{\sffamily\footnotesize\color{MutedGray}}
+\renewcommand{\cftchappagefont}{\sffamily\bfseries\color{PrimaryDark}}
+\renewcommand{\cftsecpagefont}{\sffamily\small\color{SlateText}}
+\setlength{\cftbeforechapskip}{4pt}
+\setcounter{tocdepth}{1}
+\setcounter{secnumdepth}{3}
+
+% Macros semánticas prácticas para código inline y etiquetas
+\newcommand{\code}[1]{\texttt{\color{PrimaryAccent}#1}}
+\newcommand{\pkg}[1]{\texttt{\color{TealAccent}#1}}
+\newcommand{\badge}[2][PrimaryAccent]{%
+  \tikz[baseline=(char.base)]{%
+    \node[shape=rectangle,rounded corners=2pt,fill=#1,text=white,font=\sffamily\tiny\bfseries,inner xsep=4pt,inner ysep=2pt] (char) {#2};%
+  }%
+}
+\newcommand{\yesmark}{\textcolor{EmeraldAccent}{\textbf{\ding{51}}}}
+\newcommand{\nomark}{\textcolor{CrimsonAccent}{\textbf{\ding{55}}}}
+\newcommand{\partialmark}{\textcolor{AmberAccent}{\textbf{$\sim$}}}
+
+% Hyperref (cargar al final)
+\usepackage[
+  plainpages=false,
+  pdfpagelabels=true,
+  colorlinks=true,
+  linkcolor=PrimaryAccent,
+  urlcolor=TealAccent,
+  citecolor=PrimaryDark,
+  bookmarks=true,
+  bookmarksnumbered=true,
+  bookmarksopen=true,
+  bookmarksopenlevel=1,
+  pdftitle={Orquestación de Datos, MLOps y LLMOps: Manual Técnico Avanzado de Apache Airflow y MLflow},
+  pdfauthor={Documentación Técnica Ampliada — Basada en el curso Ingeniería Big Data en la Nube (DIT-UPM)},
+  pdfsubject={Apache Airflow 2.10/3.0, Conectores y Providers, MLOps, MLflow 3, Prompt Engineering y LLMOps},
+  pdfkeywords={Apache Airflow, Airflow 3, Providers, Hooks, Connections, Deferrable Operators, MLflow, MLflow 3, MLOps, LLMOps, Prompt Engineering, Prompt Registry, Tracing, LLM-as-a-Judge, RAG, AI Gateway}
+]{hyperref}
+\usepackage{bookmark}

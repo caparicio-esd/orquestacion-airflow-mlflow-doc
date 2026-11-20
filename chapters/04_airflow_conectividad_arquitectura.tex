@@ -1,0 +1,954 @@
+% ============================================================================
+% 04_airflow_conectividad_arquitectura.tex — Capítulo 4: Arquitectura de
+% Conectividad en Airflow: Providers, Connections, Secrets, Hooks y Triggers
+% ============================================================================
+
+\chapter{Arquitectura de Conectividad en Airflow: Providers, Connections, Secrets, Hooks y Triggers}\label{chap:airflow-conectividad}
+\chaptermark{Conectividad: Providers, Secrets y Hooks}
+
+En el Capítulo~\ref{chap:airflow-dags} establecimos el principio rector de cualquier plataforma profesional basada en Apache Airflow: \textit{Airflow orquesta, no procesa}. De esa máxima se desprende una consecuencia inmediata: el verdadero valor estratégico de Airflow no reside en ejecutar scripts Python aislados dentro de sus propios \textit{workers}, sino en su capacidad para \textbf{conectarse de forma segura, uniforme, auditable y escalable} con decenas de sistemas externos heterogéneos ---bases de datos relacionales, almacenes analíticos en la nube, almacenamiento de objetos, APIs REST, clústeres Spark, proyectos dbt, contenedores Kubernetes, brókeres de mensajería y canales de alertas--- sin acoplar el código de los DAGs a credenciales ni a detalles de red de cada entorno.
+
+Lograr una conectividad limpia en producción exige comprender las cinco piezas que conforman la pila de integración de Airflow: el ecosistema modular de \textbf{Providers}, la abstracción de \textbf{Connections}, los \textbf{Secrets Backends} corporativos y la autenticación sin contraseñas (\textit{passwordless}), la capa programática de \textbf{Hooks} y el modelo de espera asíncrona basado en \textbf{Triggers} y \textbf{Deferrable Operators}. Este capítulo disecciona la arquitectura de todas ellas, sentando los fundamentos necesarios para el catálogo práctico por dominio y la construcción de conectores propios que se abordarán en el siguiente capítulo.
+
+% ----------------------------------------------------------------------------
+\section{El ecosistema de Airflow Providers}\label{sec:ecosistema-providers}
+% ----------------------------------------------------------------------------
+
+En las primeras generaciones de Airflow (1.x), el código de integración con Amazon Web Services, Google Cloud, PostgreSQL o Hadoop convivía dentro del paquete monolítico principal. Aquel diseño generaba conflictos severos de dependencias transitivas (un cambio en \pkg{boto3} o \pkg{google-cloud-*} bloqueaba la actualización de todo el orquestador) y obligaba a esperar a una versión mayor del núcleo para corregir un simple error en un operador externo.
+
+\subsection{Desacoplamiento entre el núcleo y los paquetes \texorpdfstring{\pkg{apache-airflow-providers-*}}{apache-airflow-providers-*}}
+
+Desde Airflow 2.0 (propuesta arquitectónica AIP-21) y de manera aún más marcada en Airflow 3.0 \badge[TealAccent]{Airflow 3}, el núcleo (\pkg{apache-airflow-core} / \pkg{apache-airflow}) permanece deliberadamente ligero y desacoplado de integraciones de terceros. Toda la conectividad se distribuye en más de \textbf{85 paquetes oficiales independientes} bajo la convención \pkg{apache-airflow-providers-<sistema>}, mantenidos por la comunidad Apache con ciclos de publicación propios (cada 2--4 semanas) y versionado semántico (\textit{SemVer}). A ellos se suman proveedores especializados mantenidos por fabricantes y comunidad, como \pkg{astronomer-cosmos} para dbt o \pkg{openmetadata-managed-apis}.
+
+La Tabla~\ref{tab:principales-providers} resume los paquetes \textit{Provider} más habituales en arquitecturas empresariales de datos y MLOps.
+
+\begin{table}[htbp]
+\centering
+\caption{Principales paquetes oficiales \pkg{apache-airflow-providers-*} en entornos de producción.}
+\label{tab:principales-providers}
+\small
+\begin{tabularx}{\textwidth}{@{}L{4.5cm} L{3.6cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Paquete Provider} &
+\textcolor{white}{\sffamily\bfseries SDK / driver subyacente} &
+\textcolor{white}{\sffamily\bfseries Capacidades y abstracciones clave} \\
+\midrule
+\pkg{...-amazon} & \pkg{boto3}, \pkg{aiobotocore} & S3, Redshift, EMR, Glue, Athena, SageMaker, EKS, Secrets Manager y sensores diferibles. \\
+\rowcolor{TableStripe}
+\pkg{...-google} & \pkg{google-cloud-*} & GCS, BigQuery, Dataproc, Dataflow, Vertex AI, Cloud Run y GCP Secret Manager. \\
+\pkg{...-microsoft-azure} & \pkg{azure-sdk-*} & ADLS Gen2 / Blob, Synapse, AKS, Data Factory y Azure Key Vault. \\
+\rowcolor{TableStripe}
+\pkg{...-common-sql} & \pkg{sqlparse} & Interfaz unificada \code{DbApiHook} y \code{SQLExecuteQueryOperator} para cualquier motor SQL. \\
+\pkg{...-common-io} & \pkg{fsspec}, \pkg{universal\_pathlib} & Abstracción multi-cloud \code{ObjectStoragePath} y \code{XComObjectStorageBackend}. \\
+\rowcolor{TableStripe}
+\pkg{...-postgres} / \pkg{...-snowflake} & \pkg{psycopg2}, \pkg{snowflake-connector} & Hooks SQL especializados (\code{PostgresHook}, \code{SnowflakeHook}), cargas masivas y sensores. \\
+\pkg{...-http} & \pkg{requests}, \pkg{aiohttp} & \code{HttpHook}, \code{HttpOperator} y \code{HttpSensor} (con soporte asíncrono). \\
+\rowcolor{TableStripe}
+\pkg{...-cncf-kubernetes} & \pkg{kubernetes} & \code{KubernetesPodOperator} para aislamiento completo de dependencias y GPUs. \\
+\pkg{...-apache-spark} & \code{spark-submit} / Livy & \code{SparkSubmitOperator}, \code{SparkSqlOperator} y conexión con clústeres YARN/K8s. \\
+\rowcolor{TableStripe}
+\pkg{...-apache-kafka} & \pkg{confluent-kafka} & Productores, consumidores y triggers orientados a eventos sobre tópicos Kafka. \\
+\pkg{...-databricks} / \pkg{...-slack} & REST SDKs oficiales & Orquestación de \textit{Jobs/Workflows} en Databricks y \code{SlackWebhookNotifier}. \\
+\rowcolor{TableStripe}
+\pkg{...-openlineage} & \pkg{openlineage-python} & Emisión automática de linaje de datasets y columnas hacia Marquez, DataHub o Atlan. \\
+\pkg{...-hashicorp} & \pkg{hvac} & \code{VaultBackend} para resolución de secretos desde HashiCorp Vault. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Instalación limpia, ficheros de \textit{constraints} e inspección por CLI}
+
+En producción, instalar paquetes \textit{Provider} sin fijar versiones transitivas es una fuente frecuente de roturas (por ejemplo, una actualización de \pkg{pydantic}, \pkg{sqlalchemy} o \pkg{urllib3} incompatible con el núcleo). La práctica recomendada consiste en instalar únicamente los proveedores que necesita el clúster ---ya sea mediante paquetes explícitos o extras de \pkg{apache-airflow}--- aplicando siempre el fichero oficial de \textbf{\textit{constraints}} correspondiente a la versión exacta de Airflow y Python:
+
+\begin{lstlisting}[style=bash, caption={Instalación reproducible de Providers con \textit{constraints} e inspección del catálogo instalado vía CLI.}, label={lst:providers-cli}]
+AIRFLOW_VERSION=2.10.4
+PYTHON_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+
+# Instalacion limpia y reproducible de los Providers necesarios
+pip install \
+    apache-airflow-providers-postgres \
+    apache-airflow-providers-amazon \
+    apache-airflow-providers-http \
+    apache-airflow-providers-common-sql \
+    --constraint "${CONSTRAINT_URL}"
+
+# Descubrimiento e inspeccion en tiempo de desarrollo u operacion
+airflow providers list                 # Paquetes instalados y versiones exactas
+airflow providers hooks                # Catalogo de conn_type -> clase Hook asociada
+airflow providers connections          # Tipos de Connection registrados en la UI
+airflow providers triggers             # Triggers asincronos disponibles para Triggerer
+airflow providers get apache-airflow-providers-amazon --full
+\end{lstlisting}
+
+\subsection{Arquitectura en capas de un Provider}
+
+Una característica notable del ecosistema de Airflow es que todos los \textit{Providers} siguen una misma arquitectura en capas claramente estratificada, ilustrada en la Figura~\ref{fig:pila-conectividad-provider}. Esta separación de responsabilidades permite cambiar dónde se almacenan las contraseñas (capa de secretos) sin tocar los \textit{Hooks}, o sustituir un operador declarativo por una función \code{@task} que invoca el mismo \textit{Hook} sin duplicar la lógica de autenticación ni el formato de la conexión.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=0.55cm and 0.45cm,
+  layer/.style={
+    rectangle, rounded corners=5pt, draw=LightBorder, line width=0.8pt,
+    fill=SoftBg, inner sep=8pt
+  },
+  lblside/.style={
+    font=\sffamily\scriptsize\bfseries, text=MutedGray, align=right, text width=2.5cm
+  }
+]
+  % Capa 5: DAG / TaskFlow
+  \node[darkbox, minimum width=12.6cm, minimum height=0.85cm] (dag)
+    {Código de usuario: DAGs (\code{@dag}, \code{@task}, topología y planificación)};
+  \node[lblside, left=0.4cm of dag] {Capa 5\\Orquestación};
+
+  % Capa 4: Primitivas de ejecucion
+  \node[archbox, below=0.75cm of dag, xshift=-5.1cm, text width=2.2cm] (ops)
+    {Operators\\{\scriptsize \code{SQLExecuteQuery}\\ \code{HttpOperator}}};
+  \node[archbox, right=0.35cm of ops, text width=2.2cm] (trans)
+    {Transfers\\{\scriptsize \code{S3ToRedshift}\\ \code{GCSToBigQuery}}};
+  \node[archbox, right=0.35cm of trans, text width=2.2cm] (sens)
+    {Sensors\\{\scriptsize \code{S3KeySensor}\\ \code{FileSensor}}};
+  \node[tealbox, right=0.35cm of sens, text width=2.2cm] (trig)
+    {Triggers\\{\scriptsize \code{BaseTrigger}\\ \code{asyncio}}};
+  \node[amberbox, right=0.35cm of trig, text width=2.2cm] (notif)
+    {Notifiers\\{\scriptsize \code{SlackWebhook}\\ \code{PagerDuty}}};
+  \node[lblside, left=0.4cm of ops] {Capa 4\\Primitivas\\de Provider};
+
+  % Capa 3: Hooks
+  \node[tealbox, below=0.75cm of sens, minimum width=12.6cm, minimum height=0.9cm] (hooks)
+    {Hooks (Interfaz programática reutilizable): \code{BaseHook}, \code{DbApiHook}, \code{HttpHook}, \code{AwsBaseHook}\\
+    {\scriptsize Encapsulan clientes/SDKs, sesiones, paginación, reintentos y extracción de linaje OpenLineage}};
+  \node[lblside, left=0.4cm of hooks] {Capa 3\\Clientes y\\SDKs};
+
+  % Capa 2: Connections
+  \node[archbox, below=0.75cm of hooks, minimum width=12.6cm, minimum height=0.85cm] (conn)
+    {Abstracción \code{Connection} (\code{conn\_id}, \code{conn\_type}, \code{host}, \code{port}, \code{login}, \code{password}, \code{extra})};
+  \node[lblside, left=0.4cm of conn] {Capa 2\\Metadatos\\de conexión};
+
+  % Capa 1: Secrets Backends
+  \node[amberbox, below=0.75cm of conn, xshift=-4.3cm, text width=3.7cm] (sec1)
+    {Secrets Backend Externo\\{\scriptsize Vault, AWS SM, GCP SM, Azure KV}};
+  \node[amberbox, right=0.5cm of sec1, text width=3.7cm] (sec2)
+    {Variables de Entorno\\{\scriptsize \code{AIRFLOW\_CONN\_*}}};
+  \node[amberbox, right=0.5cm of sec2, text width=3.7cm] (sec3)
+    {Metadata DB (Fernet)\\{\scriptsize Tabla \code{connection} cifrada}};
+  \node[lblside, left=0.4cm of sec1] {Capa 1\\Resolución\\de secretos};
+
+  % Sistemas externos
+  \node[dbnode, below=0.85cm of sec1, minimum width=2.6cm] (ext1) {PostgreSQL\\Snowflake / BQ};
+  \node[dbnode, below=0.85cm of sec2, minimum width=2.6cm] (ext2) {S3 / GCS / ADLS\\Object Storage};
+  \node[dbnode, below=0.85cm of sec3, minimum width=2.6cm] (ext3) {APIs REST, Spark\\K8s, Kafka, Slack};
+  \node[lblside, left=0.95cm of ext1] {Sistemas\\externos};
+
+  % Flechas verticales entre capas
+  \draw[flowarrow] (dag.south -| ops.north) -- (ops.north);
+  \draw[flowarrow] (dag.south -| trans.north) -- (trans.north);
+  \draw[flowarrow] (dag.south -| sens.north) -- (sens.north);
+  \draw[tealarrow] (dag.south -| trig.north) -- (trig.north);
+  \draw[flowarrow, color=AmberAccent] (dag.south -| notif.north) -- (notif.north);
+
+  \draw[flowarrow] (ops.south) -- (hooks.north -| ops.south);
+  \draw[flowarrow] (trans.south) -- (hooks.north -| trans.south);
+  \draw[flowarrow] (sens.south) -- (hooks.north -| sens.south);
+  \draw[tealarrow] (trig.south) -- (hooks.north -| trig.south);
+  \draw[flowarrow, color=AmberAccent] (notif.south) -- (hooks.north -| notif.south);
+
+  \draw[tealarrow] (hooks.south) -- node[elabel, right=4pt] {\code{get\_connection(conn\_id)}} (conn.north);
+
+  \draw[flowarrow, color=AmberAccent] (conn.south -| sec1.north) -- (sec1.north);
+  \draw[flowarrow, color=AmberAccent] (conn.south -| sec2.north) -- (sec2.north);
+  \draw[flowarrow, color=AmberAccent] (conn.south -| sec3.north) -- (sec3.north);
+
+  % Conexion logica desde Hooks a sistemas externos (borde derecho o flujo de red)
+  \draw[dashedarrow] (sec1.south) -- (ext1.north);
+  \draw[dashedarrow] (sec2.south) -- (ext2.north);
+  \draw[dashedarrow] (sec3.south) -- (ext3.north);
+\end{tikzpicture}%
+}
+\caption{Arquitectura en capas de la pila de conectividad de un Airflow Provider: las primitivas de ejecución consumen \textit{Hooks}, que resuelven \textit{Connections} a través de la cadena de \textit{Secrets Backends} para comunicarse con los sistemas externos.}
+\label{fig:pila-conectividad-provider}
+\end{figure}
+
+% ----------------------------------------------------------------------------
+\section{Connections en profundidad: la abstracción de credenciales y endpoints}\label{sec:connections-profundidad}
+% ----------------------------------------------------------------------------
+
+La piedra angular de la portabilidad entre entornos (Desarrollo, Preproducción y Producción) en Airflow es el objeto \code{Connection}. En lugar de incrustar direcciones IP, usuarios, contraseñas o \textit{tokens} dentro del código Python de los DAGs, las tareas referencian únicamente un identificador lógico simbólico llamado \code{conn\_id} (por ejemplo, \code{warehouse\_pg} o \code{s3\_analytics}). De este modo, el mismo código promocionado por CI/CD apunta automáticamente a la base de datos de pruebas en \textit{staging} y al clúster productivo al desplegarse en \textit{prod}, sin modificar una sola línea del DAG.
+
+\subsection{Anatomía completa de una Connection}
+
+Internamente, una instancia de \code{airflow.models.connection.Connection} (o \code{airflow.sdk.Connection} en Airflow 3 \badge[TealAccent]{Airflow 3}) normaliza los parámetros de cualquier tecnología externa en ocho campos estándar más un diccionario extensible:
+
+\begin{itemize}
+  \item \textbf{\code{conn\_id}:} identificador único referenciado desde los operadores y \textit{Hooks} (convención recomendada: \code{<dominio>\_<tecnologia>}, p.~ej., \code{finanzas\_postgres}).
+  \item \textbf{\code{conn\_type}:} tipo de conector registrado por el \textit{Provider} (\code{postgres}, \code{aws}, \code{google\_cloud\_platform}, \code{snowflake}, \code{http}, \code{kafka}, \code{spark}, \code{generic}). Determina el formulario dinámico en la UI y qué \textit{Hook} instancia \code{BaseHook.get\_hook()}.
+  \item \textbf{\code{host}:} nombre de dominio, dirección IP o URL base del servicio remoto.
+  \item \textbf{\code{port}:} puerto TCP del servicio (p.~ej., \code{5432} para PostgreSQL, \code{443} para HTTPS).
+  \item \textbf{\code{schema}:} nombre de la base de datos lógica, esquema por defecto o prefijo de ruta en APIs.
+  \item \textbf{\code{login} y \code{password}:} usuario, \textit{client ID} o clave pública junto con la contraseña, clave secreta o \textit{Bearer token}. El campo \code{password} siempre se cifra en reposo y se enmascara en los logs.
+  \item \textbf{\code{extra}:} documento JSON arbitrario donde cada \textit{Provider} almacena opciones avanzadas específicas del protocolo o driver: \code{sslmode}, \code{connect\_timeout}, \code{region\_name}, \code{role\_arn}, \code{endpoint\_url}, \code{verify} (validación TLS), \code{warehouse}, \code{role}, \code{account}, \code{bootstrap.servers} o cabeceras HTTP por defecto.
+\end{itemize}
+
+\subsection{Las cuatro formas de definir y gestionar Connections en el ciclo de vida}
+
+Según la madurez operativa del entorno, las \textit{Connections} se aprovisionan mediante cuatro mecanismos distintos que corresponden a distintas fases del ciclo de vida de software:
+
+\begin{enumerate}
+  \item \textbf{Interfaz Web (Admin $\rightarrow$ Connections) y CLI:} ideal para desarrollo local, exploración rápida o diagnóstico. La CLI ofrece comandos completos para alta, exportación e importación declarativa y verificación de conectividad (\code{airflow connections test}). Como precaución de seguridad frente a ataques SSRF (\textit{Server-Side Request Forgery}), en producción suele configurarse \code{AIRFLOW\_\_CORE\_\_TEST\_CONNECTION=Disabled} para desactivar el botón de prueba desde la UI web.
+  \item \textbf{Variables de entorno (\code{AIRFLOW\_CONN\_<CONN\_ID>}):} muy habituales en despliegues con Docker Compose, contenedores efímeros y pruebas en CI. El sufijo \code{<CONN\_ID>} debe escribirse siempre en \textbf{MAYÚSCULAS} (así, \code{warehouse\_pg} se busca en \code{AIRFLOW\_CONN\_WAREHOUSE\_PG}). Admite dos formatos: \textbf{URI} compacto y \textbf{JSON}. El formato JSON es preferible siempre que la contraseña contenga caracteres especiales (\code{@}, \code{/}, \code{?}, \code{\%}, \code{\#}) que exigirían codificación porcentual en URI, o cuando \code{extra} contiene objetos anidados.
+  \item \textbf{Infraestructura como Código (IaC) y GitOps:} en clústeres gestionados sobre Kubernetes, los equipos declaran conexiones no sensibles en \textit{values} de Helm o módulos de Terraform, inyectando secretos desde \code{Kubernetes Secrets} sincronizados por \textit{External Secrets Operator} (\code{extraEnvFrom}).
+  \item \textbf{Secrets Backends externos:} el estándar indiscutible en producción corporativa (Vault, AWS Secrets Manager, GCP Secret Manager o Azure Key Vault), donde las credenciales cuentan con auditoría de accesos, políticas IAM granulares y rotación automática (Sección~\ref{sec:secrets-backends}).
+\end{enumerate}
+
+\begin{lstlisting}[style=bash, caption={Gestión de Connections por CLI y definición mediante variables de entorno en formato URI y JSON.}, label={lst:connections-env}]
+# 1. Alta, prueba y exportacion mediante Airflow CLI
+airflow connections add 'warehouse_pg' \
+    --conn-type 'postgres' \
+    --conn-host 'pg-prod.internal' \
+    --conn-schema 'analytics' \
+    --conn-login 'etl_writer' \
+    --conn-password 'super_secret_pwd' \
+    --conn-port 5432 \
+    --conn-extra '{"sslmode": "require", "connect_timeout": 10}'
+
+airflow connections test 'warehouse_pg'
+airflow connections export connections_backup.json --file-format json
+
+# 2a. Variable de entorno en formato URI (requiere URL-encoding si hay @, /, ?)
+export AIRFLOW_CONN_WAREHOUSE_PG='postgresql://etl_writer:super_secret_pwd@pg-prod.internal:5432/analytics?sslmode=require&connect_timeout=10'
+
+# 2b. Variable de entorno en formato JSON (RECOMENDADO: sin problemas de escape)
+export AIRFLOW_CONN_CRM_API='{
+    "conn_type": "http",
+    "host": "https://api.crm-corp.example.com",
+    "login": "svc_airflow",
+    "password": "p@ss/word?con#simbolos",
+    "extra": {
+        "verify": true,
+        "timeout": 30,
+        "headers": {"Accept": "application/json"}
+    }
+}'
+\end{lstlisting}
+
+\subsection{Tabla de referencia de URIs y estructuras de Connections reales}
+
+La Tabla~\ref{tab:uris-connections} proporciona una guía de consulta rápida con el \code{conn\_type}, el formato de URI o JSON y los atributos clave del bloque \code{extra} para nueve tecnologías fundamentales en proyectos modernos de datos.
+
+\begin{table}[htbp]
+\centering
+\caption{Referencia de \code{conn\_type}, formatos URI/JSON y parámetros \code{extra} habituales para nueve conectores clave.}
+\label{tab:uris-connections}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{2.3cm} L{2.4cm} Y L{3.6cm}@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Sistema} &
+\textcolor{white}{\sffamily\bfseries \code{conn\_type}} &
+\textcolor{white}{\sffamily\bfseries Ejemplo de URI (o JSON recomendado)} &
+\textcolor{white}{\sffamily\bfseries Campos \code{extra} clave} \\
+\midrule
+\textbf{PostgreSQL} & \code{postgres} &
+\code{postgresql://user:pwd@host:5432/db\newline?sslmode=require} &
+\code{sslmode}, \code{connect\_timeout}, \code{application\_name} \\
+\rowcolor{TableStripe}
+\textbf{MySQL} & \code{mysql} &
+\code{mysql://user:pwd@host:3306/db\newline?charset=utf8mb4} &
+\code{charset}, \code{ssl}, \code{local\_infile} \\
+\textbf{AWS / S3} & \code{aws} &
+\code{aws://@/?region\_name=eu-west-1}\newline{\scriptsize (sin claves: usa IAM Role / IRSA)} &
+\code{region\_name}, \code{role\_arn}, \code{endpoint\_url} (MinIO) \\
+\rowcolor{TableStripe}
+\textbf{GCP / BigQuery} & \code{google\_cloud\newline\_platform} &
+\code{google-cloud-platform://?project=mi-proj\newline\&location=EU} {\scriptsize (Workload Identity)} &
+\code{project}, \code{key\_path}, \code{keyfile\_dict}, \code{impersonation\_chain} \\
+\textbf{Snowflake} & \code{snowflake} &
+\code{snowflake://user:pwd@/db/schema\newline?account=xy12345.eu-west-1\&warehouse=WH\_ETL} &
+\code{account}, \code{warehouse}, \code{role}, \code{private\_key\_content} \\
+\rowcolor{TableStripe}
+\textbf{HTTP / REST} & \code{http} &
+\code{https://user:token@api.ejemplo.com:443} &
+\code{verify}, \code{timeout}, \code{proxies}, cabeceras JSON \\
+\textbf{Apache Kafka} & \code{kafka} &
+{\scriptsize JSON:} \code{\{"conn\_type":"kafka","extra":\newline\{"bootstrap.servers":"b1:9092"\}\}} &
+\code{bootstrap.servers}, \code{security.protocol}, \code{sasl.mechanism} \\
+\rowcolor{TableStripe}
+\textbf{Apache Spark} & \code{spark} &
+\code{spark://spark-master:7077}\newline{\scriptsize o \code{k8s://https://k8s-api:443}} &
+\code{deploy-mode}, \code{queue}, \code{namespace} \\
+\textbf{Slack Webhook} & \code{slackwebhook} &
+\code{slackwebhook://:T00/B00/XXXX\newline@hooks.slack.com/services} &
+\code{proxy}, \code{timeout} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Cifrado en reposo con \texorpdfstring{\code{FERNET\_KEY}}{FERNET\_KEY} y rotación de claves}
+
+Cuando una \textit{Connection} se almacena en la base de datos de metadatos de Airflow, los campos sensibles (\code{password} y \code{extra}) jamás deben guardarse en texto plano. Airflow emplea cifrado simétrico autenticado mediante la librería \pkg{cryptography.fernet} (\textbf{AES-128-CBC} con integridad \textbf{HMAC-SHA256}) gobernado por la clave configurada en \code{AIRFLOW\_\_CORE\_\_FERNET\_KEY}. Si esta variable no se establece explícitamente en entornos gestionados o contenedores, Airflow genera una clave aleatoria distinta en cada reinicio o bien almacena sin cifrado dependiendo de la versión, rompiendo la lectura de credenciales tras reiniciar el servicio.
+
+Para cumplir políticas de seguridad corporativas, Airflow soporta \textbf{rotación de claves sin tiempo de inactividad} (\textit{zero-downtime key rotation}) gracias al objeto \code{MultiFernet}, que acepta múltiples claves separadas por comas (cifra siempre con la primera clave de la lista y descifra probando secuencialmente el resto):
+
+\begin{lstlisting}[style=bash, caption={Generación y procedimiento de rotación segura de \code{FERNET\_KEY} sin pérdida de servicio.}, label={lst:fernet-rotation}]
+# 1. Generar una nueva clave Fernet criptograficamente segura (32 bytes base64)
+NEW_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+
+# 2. Desplegar el cluster anteponiendo NEW_KEY delante de OLD_KEY
+export AIRFLOW__CORE__FERNET_KEY="${NEW_KEY},${OLD_KEY}"
+
+# 3. Re-cifrar todas las filas existentes (connections y variables) con NEW_KEY
+airflow rotate-fernet-key
+
+# 4. Una vez completado y verificado, retirar OLD_KEY de la configuracion
+export AIRFLOW__CORE__FERNET_KEY="${NEW_KEY}"
+\end{lstlisting}
+
+\begin{warningbox}[Custodia crítica de \code{FERNET\_KEY}]
+Nunca incluyas \code{FERNET\_KEY} en un repositorio Git ni en imágenes Docker; inyéctala siempre desde un gestor de secretos del clúster. Asimismo, perder la clave activa sin copia de seguridad implica que las contraseñas cifradas en la tabla \code{connection} de la Metadata DB resultan \textbf{matemáticamente irrecuperables} y deberán recrearse manualmente.
+\end{warningbox}
+
+% ----------------------------------------------------------------------------
+\section{Secrets Backends y Seguridad Enterprise en Producción}\label{sec:secrets-backends}
+% ----------------------------------------------------------------------------
+
+En organizaciones reguladas o con múltiples clústeres de Airflow (desarrollo, analítica, finanzas, ML), duplicar credenciales dentro de la base de datos de metadatos de cada instancia complica las auditorías, dificulta la revocación inmediata ante incidentes y rompe la rotación centralizada. La solución empresarial consiste en delegar la custodia en un \textbf{Secrets Backend externo}.
+
+\subsection{Cadena de resolución de secretos de Airflow}
+
+Cada vez que un \textit{Hook} solicita una conexión mediante \code{BaseHook.get\_connection("warehouse\_pg")} (o una tarea consulta \code{Variable.get("api\_config")}), Airflow recorre una cadena determinista de resolución de tres niveles con semántica \textbf{\textit{first hit wins}} (el primer nivel que encuentra el identificador devuelve el objeto inmediatamente y detiene la búsqueda), tal como ilustra la Figura~\ref{fig:secrets-resolution-chain}.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=0.8cm and 1.1cm,
+  dec/.style={
+    diamond, aspect=2.1, draw=PrimaryAccent, line width=0.9pt,
+    fill=InfoBg, text=PrimaryDark, font=\sffamily\scriptsize\bfseries,
+    align=center, inner sep=2.5pt
+  },
+  stepbox/.style={
+    rectangle, rounded corners=4pt, draw=PrimaryAccent, line width=0.9pt,
+    fill=white, text=PrimaryDark, font=\sffamily\footnotesize\bfseries,
+    align=center, text width=3.6cm, minimum height=1.0cm, inner sep=5pt,
+    drop shadow={opacity=0.1}
+  }
+]
+  % Nodo inicial
+  \node[darkbox, text width=3.1cm] (req)
+    {Llamada en Worker:\\ \code{get\_connection(id)}};
+
+  % Nivel 1: Secrets Backend externo + cache
+  \node[stepbox, draw=TealAccent, fill=ModernBg, right=1.0cm of req] (lvl1)
+    {1. Secrets Backend Externo\\{\scriptsize Vault / AWS SM / GCP SM / Azure KV\\(Caché TTL opcional)}};
+  \node[dec, below=0.8cm of lvl1] (d1) {¿Existe?};
+
+  % Nivel 2: Env vars
+  \node[stepbox, draw=AmberAccent, fill=WarnBg, right=1.1cm of lvl1] (lvl2)
+    {2. Variables de Entorno\\{\scriptsize \code{AIRFLOW\_CONN\_<ID>}\\(URI o JSON en proceso)}};
+  \node[dec, below=0.8cm of lvl2] (d2) {¿Existe?};
+
+  % Nivel 3: Metadata DB
+  \node[stepbox, draw=PrimaryAccent, fill=InfoBg, right=1.1cm of lvl2] (lvl3)
+    {3. Metadata DB\\{\scriptsize Tabla \code{connection}\\(Descifrado \code{FERNET\_KEY})}};
+  \node[dec, below=0.8cm of lvl3] (d3) {¿Existe?};
+
+  % Salidas finales
+  \node[tealbox, below=1.15cm of d2, text width=5.6cm] (ok)
+    {Objeto \code{Connection} resuelto\\{\scriptsize Secretos registrados en \code{SecretsMasker} $\rightarrow$ Logs \code{***}}};
+  \node[archbox, draw=CrimsonAccent, fill=CrimsonAccent!8!white, text=CrimsonAccent,
+        below=1.15cm of d3, text width=3.5cm] (err)
+    {\code{AirflowNotFoundException}\\{\scriptsize Conexión no definida}};
+
+  % Flechas
+  \draw[flowarrow] (req) -- (lvl1);
+  \draw[tealarrow] (lvl1) -- (d1);
+  \draw[flowarrow] (d1.east) -- node[elabel, above=2pt] {No} ++(0.7,0) |- (lvl2.west);
+  \draw[flowarrow, color=AmberAccent] (lvl2) -- (d2);
+  \draw[flowarrow] (d2.east) -- node[elabel, above=2pt] {No} ++(0.7,0) |- (lvl3.west);
+  \draw[flowarrow] (lvl3) -- (d3);
+
+  % Ramas "Si" hacia salida OK
+  \draw[tealarrow] (d1.south) |- node[pos=0.25, elabel, left=3pt] {Sí} (ok.west);
+  \draw[tealarrow] (d2.south) -- node[elabel, right=3pt] {Sí} (ok.north);
+  \draw[tealarrow] (d3.south west) -- ++(-0.35,-0.35) |- node[pos=0.2, elabel, left=2pt] {Sí} (ok.east);
+
+  % Rama "No" hacia error
+  \draw[flowarrow, color=CrimsonAccent] (d3.south) -- node[elabel, right=3pt] {No} (err.north);
+\end{tikzpicture}%
+}
+\caption{Cadena determinista de resolución de secretos en Apache Airflow (prioridad \textit{first hit wins}) y registro automático de valores sensibles en \code{SecretsMasker}.}
+\label{fig:secrets-resolution-chain}
+\end{figure}
+
+Esta precedencia aporta dos ventajas tácticas muy útiles: en producción, las credenciales oficiales se centralizan en el gestor externo sin almacenarse nunca en la Metadata DB; y en desarrollo local (donde no se activa el backend externo), un ingeniero puede sobrescribir temporalmente cualquier conexión de la base de datos local definiendo una variable \code{AIRFLOW\_CONN\_*} en su terminal.
+
+\subsection{Configuración de los cuatro grandes Secrets Backends}
+
+La integración se activa estableciendo dos parámetros en \code{airflow.cfg} (o sus equivalentes en variables de entorno): la clase de backend (\code{AIRFLOW\_\_SECRETS\_\_BACKEND}) y un diccionario JSON con los argumentos específicos del proveedor (\code{AIRFLOW\_\_SECRETS\_\_BACKEND\_KWARGS}). El Listado~\ref{lst:secrets-backends-config} muestra configuraciones listas para producción de los cuatro backends más extendidos.
+
+\begin{lstlisting}[style=bash, caption={Configuración de \textit{Secrets Backends} para AWS Secrets Manager, HashiCorp Vault, GCP Secret Manager y Azure Key Vault.}, label={lst:secrets-backends-config}]
+# ----------------------------------------------------------------------------
+# 1. AWS Secrets Manager (requiere apache-airflow-providers-amazon)
+#    Busca secretos en: airflow/connections/<conn_id>
+# ----------------------------------------------------------------------------
+export AIRFLOW__SECRETS__BACKEND="airflow.providers.amazon.aws.secrets.secrets_manager.SecretsManagerBackend"
+export AIRFLOW__SECRETS__BACKEND_KWARGS='{
+    "connections_prefix": "airflow/connections",
+    "variables_prefix": "airflow/variables",
+    "connections_lookup_pattern": "^(prod_|shared_)",
+    "full_url_mode": false
+}'
+
+# ----------------------------------------------------------------------------
+# 2. HashiCorp Vault con Kubernetes Auth o AppRole (providers-hashicorp)
+#    En EKS/GKE/AKS se prefiere auth_type="kubernetes" sin secretos estaticos
+# ----------------------------------------------------------------------------
+export AIRFLOW__SECRETS__BACKEND="airflow.providers.hashicorp.secrets.vault.VaultBackend"
+export AIRFLOW__SECRETS__BACKEND_KWARGS='{
+    "url": "https://vault.corp.internal:8200",
+    "auth_type": "kubernetes",
+    "kubernetes_role": "airflow-workers-prod",
+    "mount_point": "secret",
+    "kv_engine_version": 2,
+    "connections_path": "airflow/connections",
+    "variables_path": "airflow/variables"
+}'
+# Alternativa fuera de K8s: "auth_type": "approle", "role_id": "...", "secret_id": "..."
+
+# ----------------------------------------------------------------------------
+# 3. Google Cloud Secret Manager (providers-google)
+#    Busca secretos nombrados: airflow-connections-<conn_id>
+# ----------------------------------------------------------------------------
+export AIRFLOW__SECRETS__BACKEND="airflow.providers.google.cloud.secrets.secret_manager.CloudSecretManagerBackend"
+export AIRFLOW__SECRETS__BACKEND_KWARGS='{
+    "project_id": "mi-proyecto-gcp-prod",
+    "connections_prefix": "airflow-connections",
+    "variables_prefix": "airflow-variables",
+    "sep": "-"
+}'
+
+# ----------------------------------------------------------------------------
+# 4. Azure Key Vault (providers-microsoft-azure)
+#    Autenticado automaticamente via Managed Identity / DefaultAzureCredential
+# ----------------------------------------------------------------------------
+export AIRFLOW__SECRETS__BACKEND="airflow.providers.microsoft.azure.secrets.key_vault.AzureKeyVaultBackend"
+export AIRFLOW__SECRETS__BACKEND_KWARGS='{
+    "vault_url": "https://kv-airflow-prod.vault.azure.net/",
+    "connections_prefix": "airflow-connections",
+    "variables_prefix": "airflow-variables"
+}'
+\end{lstlisting}
+
+La Tabla~\ref{tab:secrets-backends-comparativa} compara las características operativas de estos cuatro backends para orientar la selección según la infraestructura del equipo.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa técnica de los principales \textit{Secrets Backends} empresariales en Airflow.}
+\label{tab:secrets-backends-comparativa}
+\small
+\begin{tabularx}{\textwidth}{@{}L{3.1cm} L{3.4cm} L{3.2cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Backend} &
+\textcolor{white}{\sffamily\bfseries Convención de nombre} &
+\textcolor{white}{\sffamily\bfseries Autenticación recomendada} &
+\textcolor{white}{\sffamily\bfseries Notas operativas y de coste} \\
+\midrule
+\textbf{AWS Secrets Manager} & \code{airflow/\allowbreak connections/\allowbreak <id>} & IAM Role (IRSA / EKS Pod Identity) & Cobro por secreto y cada 10\,000 llamadas API; imprescindible activar caché o \code{lookup\_pattern}. \\
+\rowcolor{TableStripe}
+\textbf{HashiCorp Vault} & \code{secret/data/\allowbreak airflow/\allowbreak connections/\allowbreak <id>} & Kubernetes Auth o AppRole & Multi-cloud e híbrido; soporta credenciales dinámicas de BD con TTL corto y auditoría granular. \\
+\textbf{GCP Secret Manager} & \code{airflow-\allowbreak connections-\allowbreak <id>} & Workload Identity Federation (GKE) & El separador debe ser \code{-} (GCP no admite \code{/} en el nombre del secreto); versionado nativo. \\
+\rowcolor{TableStripe}
+\textbf{Azure Key Vault} & \code{airflow-\allowbreak connections-\allowbreak <id>} & Workload Identity / Managed Identity & Nombres solo alfanuméricos y guiones (sustituir guiones bajos \code{\_} en \code{conn\_id} o mapear prefijo). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Solo lectura, mitigación de \textit{throttling} y enmascaramiento en logs}
+
+Al operar con un \textit{Secrets Backend} externo en producción, tres detalles operativos marcan la diferencia entre un clúster estable y uno frágil:
+
+\begin{enumerate}
+  \item \textbf{Naturaleza de solo lectura:} todos los \textit{Secrets Backends} de Airflow son estrictamente \textbf{de solo lectura}. Si un administrador edita una conexión desde la interfaz web de Airflow, ese cambio se escribe únicamente en la Metadata DB y nunca se propaga hacia Vault o AWS Secrets Manager ---e incluso quedará oculto por la prioridad superior del backend externo---. Las altas y rotaciones deben gestionarse vía Terraform o el flujo corporativo del gestor de secretos.
+  \item \textbf{Caché y filtros \code{lookup\_pattern} contra \textit{throttling}:} sin caché ni filtrado, cada llamada a \code{get\_connection} o \code{Variable.get} emite una petición HTTPS al gestor remoto. En un clúster con 500 tareas concurrentes, esto dispara errores HTTP 429 (\textit{rate limiting}) y dispara la factura mensual de API en cloud. Para mitigarlo existen dos defensas: restringir mediante expresiones regulares qué identificadores se buscan externamente (\code{connections\_lookup\_pattern}, como en el Listado~\ref{lst:secrets-backends-config}) y habilitar la caché local de secretos en memoria del proceso (\code{AIRFLOW\_\_SECRETS\_\_USE\_CACHE=True} y \code{AIRFLOW\_\_SECRETS\_\_CACHE\_TTL=900}).
+  \item \textbf{Enmascaramiento automático y manual de logs (\code{mask\_secret}):} Airflow registra automáticamente en \code{SecretsMasker} cualquier valor proveniente de \code{Connection.password}, de claves sensibles dentro de \code{extra} y de Variables cuyos nombres contengan patrones sensibles (\code{password}, \code{secret}, \code{token}, \code{api\_key}, \code{access\_key}, \code{authorization}), sustituyendo su aparición por \code{***} en los logs de la tarea. Cuando una tarea genera u obtiene un \textit{token} efímero directamente desde un endpoint OAuth2 propio, debe registrarlo explícitamente antes de cualquier traza:
+\end{enumerate}
+
+\begin{lstlisting}[style=python, caption={Registro explícito de un secreto dinámico obtenido en tiempo de ejecución para enmascararlo en logs.}, label={lst:mask-secret}]
+# Airflow 2.x: from airflow.utils.log.secrets_masker import mask_secret
+# Airflow 3.0+: from airflow.sdk.execution_time.secrets_masker import mask_secret
+from airflow.utils.log.secrets_masker import mask_secret
+from airflow.decorators import task
+
+
+@task
+def llamar_api_con_token_dinamico() -> None:
+    token_efimero = solicitar_token_oauth2_interno()
+    # A partir de aqui, cualquier print() o excepcion mostrara "***" en su lugar
+    mask_secret(token_efimero)
+    print(f"Autenticado correctamente con bearer={token_efimero}")
+\end{lstlisting}
+
+\begin{modernbox}[Autenticación \textit{passwordless} en Cloud y aislamiento API en Airflow 3]
+En las arquitecturas cloud modernas (2025--2026), almacenar claves estáticas de larga duración (\code{aws\_access\_key\_id}/\code{aws\_secret\_access\_key} o ficheros JSON de cuentas de servicio de GCP) dentro de una \code{Connection} se considera un \textbf{anti-patrón de seguridad}. En su lugar, la identidad se delega en la federación nativa de Kubernetes y el proveedor cloud:
+\begin{itemize}
+  \item \textbf{AWS EKS --- IRSA / EKS Pod Identity:} cada \textit{ServiceAccount} del pod worker asume un rol IAM mediante \textit{tokens} OIDC efímeros rotados automáticamente. La conexión \code{aws} en Airflow solo declara \code{\{"region\_name": "eu-west-1"\}}, con \code{login} y \code{password} vacíos.
+  \item \textbf{GCP GKE --- Workload Identity Federation:} vincula el \textit{ServiceAccount} de Kubernetes a una \textit{Google Service Account}; los \textit{Hooks} obtienen credenciales vía ADC (\textit{Application Default Credentials}) sin descargar jamás un fichero JSON.
+  \item \textbf{Azure AKS --- Workload Identity / Managed Identities:} el SDK adquiere \textit{tokens} Entra ID de vida corta mediante \code{DefaultAzureCredential}.
+\end{itemize}
+Además, \textbf{Airflow 3.0} \badge[TealAccent]{Airflow 3} refuerza la seguridad de perímetro eliminando el acceso directo de los \textit{workers} a la Metadata DB: las tareas solicitan sus \textit{Connections} y \textit{Variables} a través de la nueva \textbf{Task Execution API} sobre HTTP autenticado con JWT de ámbito limitado a la ejecución concreta, impidiendo que código comprometido en un DAG lea secretos de otros equipos.
+\end{modernbox}
+
+% ----------------------------------------------------------------------------
+\section{Hooks: la interfaz programática reutilizable}\label{sec:hooks-interfaz}
+% ----------------------------------------------------------------------------
+
+Mientras que una \code{Connection} es un contenedor pasivo de metadatos y credenciales, un \textbf{Hook} es la clase Python activa que sabe cómo hablar con el sistema externo utilizando esa \code{Connection}. Cada operador de un \textit{Provider} delega internamente su trabajo real en uno o varios \textit{Hooks}, lo que permite reutilizar exactamente la misma interfaz tanto dentro de operadores declarativos como dentro de funciones \code{@task} en la \textit{TaskFlow API}.
+
+\subsection{Jerarquía de clases de Hooks}
+
+La arquitectura de \textit{Hooks} se construye sobre una jerarquía orientada a objetos limpia y predecible:
+
+\begin{description}
+  \item[\code{BaseHook} (\pkg{airflow.hooks.base} / \pkg{airflow.sdk.bases.hook}):] clase raíz de todos los \textit{Hooks}. Proporciona \code{get\_connection(conn\_id)} para resolver la conexión mediante la cadena de secretos, el método abstracto \code{get\_conn()} que devuelve el cliente o sesión nativa del SDK subyacente, \code{test\_connection()} para comprobar disponibilidad y los atributos de introspección (\code{conn\_name\_attr}, \code{default\_conn\_name}, \code{conn\_type}).
+  \item[\code{DbApiHook} (\pkg{airflow.providers.common.sql.hooks.sql}):] clase base de los conectores SQL conformes a Python DB-API 2.0 (\code{PostgresHook}, \code{MySqlHook}, \code{SnowflakeHook}, \code{TrinoHook}, \code{SqliteHook}). Estandariza operaciones de alto nivel:
+    \begin{itemize}
+      \item \code{get\_records(sql, parameters)} y \code{get\_first(sql, parameters)}: lectura segura con consultas parametrizadas (protección frente a inyección SQL).
+      \item \code{get\_pandas\_df(sql, parameters)}: carga directa de un resultado acotado a un \code{DataFrame}.
+      \item \code{get\_sqlalchemy\_engine()}: acceso al motor SQLAlchemy para integración con bibliotecas de validación o carga.
+      \item \code{run(sql, autocommit, parameters, handler)}: ejecución de sentencias DDL/DML o bloques transaccionales.
+      \item \code{insert\_rows(table, rows, commit\_every, replace)}: inserción por lotes (\textit{batching}) con soporte opcional de \textit{upsert}.
+    \end{itemize}
+  \item[\code{HttpHook} (\pkg{airflow.providers.http.hooks.http}):] envuelve \pkg{requests.Session} gestionando URL base, autenticación (Basic, Bearer, Digest), verificación TLS, \code{run()} y \code{run\_with\_advanced\_retry()} integrado con \pkg{tenacity} para reintentos HTTP selectivos ante códigos 429 o 5xx.
+  \item[\code{AwsBaseHook} (\pkg{airflow.providers.amazon.aws.hooks.base\_aws}):] base de \code{S3Hook}, \code{EmrHook}, \code{GlueJobHook} y \code{RedshiftDataHook}. Administra sesiones \pkg{boto3}, asunción de roles STS (\code{AssumeRole} entre cuentas AWS), reintentos adaptativos del SDK y sobreescritura de \code{endpoint\_url} (clave para trabajar con MinIO o LocalStack).
+\end{description}
+
+\subsection{Cuándo usar un Hook dentro de \texorpdfstring{\code{@task}}{@task} frente a un Operador preconstruido}
+
+Una decisión de diseño recurrente al crear pipelines con \textit{TaskFlow API} consiste en elegir entre invocar un \textit{Hook} directamente dentro de una función \code{@task} o instanciar un Operador preconstruido del \textit{Provider}. La Tabla~\ref{tab:hook-vs-operator} sintetiza los criterios de ingeniería que guían esta elección.
+
+\begin{table}[htbp]
+\centering
+\caption{Matriz de decisión: \textit{Hook} dentro de \code{@task} frente a Operador preconstruido.}
+\label{tab:hook-vs-operator}
+\small
+\begin{tabularx}{\textwidth}{@{}L{3.5cm} Y Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Criterio técnico} &
+\textcolor{white}{\sffamily\bfseries Hook dentro de \code{@task}} &
+\textcolor{white}{\sffamily\bfseries Operador preconstruido} \\
+\midrule
+\textbf{Flujo Python complejo} & \yesmark{} Ideal para paginación de APIs, bucles condicionales, streaming por chunks o combinar dos sistemas en un paso atómico. & \nomark{} Rígido: exige escribir un operador personalizado si la lógica se sale del caso previsto. \\
+\rowcolor{TableStripe}
+\textbf{Declaratividad y mantenimiento} & \partialmark{} Mayor código propio que mantener y probar unitariamente. & \yesmark{} Mínimo código (\textit{boilerplate}), mantenido y actualizado por la comunidad Apache. \\
+\textbf{Templating Jinja nativo} & \partialmark{} Requiere usar argumentos de contexto (\code{ds=None}) o \code{get\_current\_context()}. & \yesmark{} Renderizado automático de \code{template\_fields} (\code{sql}, \code{filepath}, ficheros \code{.sql} externos). \\
+\rowcolor{TableStripe}
+\textbf{Deferrability (Triggerer)} & \nomark{} No soporta \code{deferrable=True} de forma trivial sin lógica extra. & \yesmark{} Muchos operadores modernos soportan \code{deferrable=True} en una línea. \\
+\textbf{Linaje OpenLineage} & \nomark{} No emite linaje automático salvo instrumentación manual. & \yesmark{} Emite linaje de tablas, ficheros y columnas de forma nativa (p.~ej. \code{SQLExecuteQueryOperator}). \\
+\rowcolor{TableStripe}
+\textbf{Recomendación general} & Lógica a medida de ingesta, enriquecimiento ligero, orquestación multi-API o streaming controlado. & Consultas SQL/ELT, transferencias cloud nativas, trabajos Spark/Databricks/K8s y sensores. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Caso práctico: evolución del ETL PostgreSQL hacia S3}
+
+Para ilustrar la transición desde un prototipo funcional hasta una implementación apta para producción, examinemos un escenario cotidiano: extraer la partición diaria de ventas desde PostgreSQL y subirla a un bucket de Amazon S3 utilizando \code{PostgresHook} y \code{S3Hook}.
+
+El Listado~\ref{lst:postgres-s3-base} presenta la versión introductoria canónica: limpia, legible y totalmente libre de credenciales incrustadas gracias a \code{warehouse\_pg} y \code{s3\_default}.
+
+\begin{lstlisting}[style=python, caption={Versión base didáctica de extracción PostgreSQL $\rightarrow$ S3 con \code{PostgresHook} y \code{S3Hook}.}, label={lst:postgres-s3-base}]
+from airflow.decorators import task
+from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+
+@task
+def extraer_ventas_base(ds: str | None = None) -> str:
+    pg = PostgresHook(postgres_conn_id="warehouse_pg")
+    # Consulta parametrizada (%s) para evitar inyeccion SQL
+    df = pg.get_pandas_df(
+        sql="SELECT * FROM ventas WHERE fecha = %s",
+        parameters=[ds],
+    )
+    return df.to_json()  # ATENCION: empuja el JSON completo por XCom
+
+
+@task
+def subir_a_s3_base(payload: str, ds: str | None = None) -> None:
+    s3 = S3Hook(aws_conn_id="s3_default")
+    s3.load_string(
+        string_data=payload,
+        key=f"ventas/dt={ds}/data.json",
+        bucket_name="analytics-raw",
+        replace=True,  # Sobrescritura idempotente para la particion dt=ds
+    )
+\end{lstlisting}
+
+Aunque el Listado~\ref{lst:postgres-s3-base} funciona con unos pocos cientos de filas en un laboratorio docente, una revisión de arquitectura para producción detecta inmediatamente \textbf{cuatro cuellos de botella críticos}:
+\begin{enumerate}
+  \item \textbf{Desbordamiento de XCom:} retornar \code{df.to\_json()} serializa todo el conjunto de datos dentro de la tabla \code{xcom} de la Metadata DB, rompiendo el límite de 48--64\,KB en cuanto la tabla supera unas decenas de filas.
+  \item \textbf{Presión de memoria RAM en el worker:} \code{get\_pandas\_df()} materializa todas las filas simultáneamente en memoria; un día de pico (p.~ej., \textit{Black Friday}) provoca un \code{OOMKilled}.
+  \item \textbf{Formato ineficiente:} JSON orientado a filas ocupa entre $5\times$ y $10\times$ más espacio que Parquet comprimido, carece de esquema tipado fuerte y encarece las lecturas analíticas posteriores en Athena, Spark o BigQuery.
+  \item \textbf{Lectura sin streaming:} en PostgreSQL, extraer grandes volúmenes por cursor nombrado (\textit{server-side cursor}) en lotes o mediante \code{COPY (...) TO STDOUT} reduce drásticamente el consumo de memoria y el tiempo de transferencia.
+\end{enumerate}
+
+\begin{examplebox}[Refactorización a producción: streaming por lotes hacia Parquet en S3 y paso de URI]
+El Listado~\ref{lst:postgres-s3-pro} corrige los cuatro problemas en un único diseño idempotente: utiliza un \textbf{cursor de servidor} en PostgreSQL para leer en bloques de $50\,000$ filas con consumo de RAM constante ($O(1)$ respecto al tamaño total de la partición), escribe progresivamente un fichero \textbf{Parquet comprimido con Zstd} en un directorio temporal aislado, lo sube mediante carga multiparte con \code{S3Hook.load\_file()} y devuelve por XCom únicamente un diccionario ligero de metadatos ($\approx 150$ bytes) con la URI final para las tareas aguas abajo.
+
+\begin{lstlisting}[style=python, caption={Versión de producción: extracción por cursor en streaming, escritura incremental en Parquet y paso exclusivo de URI por XCom.}, label={lst:postgres-s3-pro}]
+from pathlib import Path
+import tempfile
+import pendulum
+from airflow.decorators import dag, task
+
+
+@dag(
+    dag_id="etl_postgres_a_s3_produccion",
+    schedule="@daily",
+    start_date=pendulum.datetime(2026, 4, 1, tz="UTC"),
+    catchup=False,
+    max_active_runs=2,
+    tags=["postgres", "s3", "parquet", "produccion"],
+)
+def etl_ventas_pro():
+    @task
+    def extraer_y_subir_parquet(ds: str | None = None) -> dict:
+        # Importaciones pesadas diferidas dentro de la tarea (parseo rapido)
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+        from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+        bucket = "analytics-raw"
+        s3_key = f"ventas/dt={ds}/ventas_{ds}.parquet"
+        chunk_size = 50_000
+        total_rows = 0
+
+        pg = PostgresHook(postgres_conn_id="warehouse_pg")
+        s3 = S3Hook(aws_conn_id="s3_default")
+
+        sql = """
+            SELECT order_id, customer_id, tienda_id, importe_eur, created_at
+            FROM ventas
+            WHERE fecha = %s
+        """
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local_parquet = Path(tmp_dir) / f"ventas_{ds}.parquet"
+            writer = None
+
+            # Cursor de servidor (name=...) evita cargar toda la tabla en RAM
+            with pg.get_conn() as conn:
+                with conn.cursor(name=f"cur_ventas_{ds.replace('-', '')}") as cur:
+                    cur.itersize = chunk_size
+                    cur.execute(sql, (ds,))
+
+                    while True:
+                        rows = cur.fetchmany(chunk_size)
+                        if not rows:
+                            break
+                        col_names = [desc[0] for desc in cur.description]
+                        cols = list(zip(*rows))
+                        batch_table = pa.Table.from_arrays(
+                            [pa.array(col) for col in cols],
+                            names=col_names,
+                        )
+                        if writer is None:
+                            writer = pq.ParquetWriter(
+                                local_parquet,
+                                batch_table.schema,
+                                compression="zstd",
+                            )
+                        writer.write_table(batch_table)
+                        total_rows += len(rows)
+
+            if writer is not None:
+                writer.close()
+
+            if total_rows == 0:
+                raise ValueError(f"Sin registros de ventas para fecha={ds}")
+
+            # load_file utiliza subida multiparte de boto3 de forma transparente
+            s3.load_file(
+                filename=str(local_parquet),
+                key=s3_key,
+                bucket_name=bucket,
+                replace=True,
+            )
+            file_bytes = local_parquet.stat().st_size
+
+        # XCom ligero: solo la URI y metricas de control (~150 bytes)
+        return {
+            "s3_uri": f"s3://{bucket}/{s3_key}",
+            "row_count": total_rows,
+            "size_bytes": file_bytes,
+            "partition_dt": ds,
+        }
+
+    @task
+    def registrar_particion_catalogo(meta: dict) -> None:
+        print(
+            f"Particion {meta['partition_dt']} publicada en {meta['s3_uri']} "
+            f"({meta['row_count']} filas, {meta['size_bytes'] / 1024:.1f} KB)."
+        )
+
+    metadatos = extraer_y_subir_parquet()
+    registrar_particion_catalogo(metadatos)
+
+
+etl_ventas_pro()
+\end{lstlisting}
+\end{examplebox}
+
+En volúmenes todavía superiores (decenas o cientos de gigabytes diarios), incluso este patrón se reemplaza por transferencias completamente \textit{server-side} (como \code{aws\_s3.query\_export\_to\_s3} en Amazon RDS/Aurora PostgreSQL, \code{COPY INTO @stage} en Snowflake o lectura JDBC paralela desde Apache Spark), preservando intacto el principio de mantener ligeros los \textit{workers} de Airflow.
+
+% ----------------------------------------------------------------------------
+\section{Sensores, Triggers y Deferrable Operators: espera eficiente a escala}\label{sec:sensores-triggers-deferrable}
+% ----------------------------------------------------------------------------
+
+En arquitecturas empresariales orientadas a ficheros, lotes externos o trabajos largos en motores remotos (un \textit{job} de Spark de 2 horas, un entrenamiento en SageMaker o la llegada nocturna de un CSV por SFTP), el orquestador dedica una fracción sorprendente de su tiempo simplemente a \textbf{esperar}. Cómo se implementa esa espera determina si un clúster de Airflow escala sin esfuerzo a miles de pipelines o colapsa por agotamiento de recursos.
+
+\subsection{El problema clásico de los sensores: bloqueo de \textit{worker slots} en modo \texorpdfstring{\code{poke}}{poke}}
+
+Un \textbf{Sensor} (\code{BaseSensorOperator}) comprueba periódicamente un predicado externo (implementado en su método \code{poke(context) -> bool}) cada \code{poke\_interval} segundos hasta que devuelve \code{True} o se agota el \code{timeout}.
+
+Por defecto, los sensores se ejecutan en \textbf{\code{mode="poke"}}: la tarea ocupa un \textit{worker slot} (un proceso en \code{CeleryExecutor} o un Pod completo en \code{KubernetesExecutor}) y permanece dormida en un bucle \code{time.sleep(poke\_interval)} durante todo el tiempo de espera. Considérese un clúster con 32 \textit{worker slots} donde 35 pipelines diarios lanzan a las 00:00 un \code{FileSensor} o \code{S3KeySensor} en modo \code{poke} esperando ficheros que llegan a las 04:00: \textbf{el 100\% del clúster queda bloqueado durante cuatro horas}. Ninguna otra tarea crítica ---incluso un pipeline de alertas de 10 segundos--- puede arrancar, provocando un \textit{deadlock} operativo (especialmente letal cuando los sensores esperan el resultado de otro DAG que también necesita un \textit{worker slot} para ejecutarse!).
+
+\subsection{Modo \code{reschedule}, parámetros de control y decorador \texorpdfstring{\code{@task.sensor}}{@task.sensor}}
+
+La primera gran mitigación es configurar \textbf{\code{mode="reschedule"}}. Cuando \code{poke()} devuelve \code{False}, el sensor lanza internamente una \code{AirflowRescheduleException}, la \code{TaskInstance} pasa al estado \code{up\_for\_reschedule} (véase Figura~\ref{fig:ti-state-machine}) y \textbf{libera inmediatamente el \textit{worker slot}}. Transcurridos \code{poke\_interval} segundos, el \textit{Scheduler} vuelve a encolar la tarea para un nuevo chequeo breve.
+
+\begin{infobox}[Regla práctica de selección entre \code{poke} y \code{reschedule}]
+Si el intervalo de comprobación esperado o \code{poke\_interval} es \textbf{superior a 60 segundos}, utiliza siempre \code{mode="reschedule"} (o mejor aún, un operador \code{deferrable=True}). Reserva \code{mode="poke"} únicamente para esperas muy breves con \code{poke\_interval <= 60} segundos donde el coste de reprogramar y arrancar un nuevo worker/Pod en cada iteración superaría al beneficio de liberar el slot.
+\end{infobox}
+
+Además del modo, todo sensor en producción debe configurar de forma explícita cuatro parámetros defensivos:
+\begin{itemize}
+  \item \code{poke\_interval}: segundos entre comprobaciones (p.~ej., \code{300} s = 5 min).
+  \item \code{timeout}: duración máxima acumulada antes de fallar (por defecto son 7 días, un valor peligrosamente alto en producción; conviene acotarlo a 2--6 horas).
+  \item \code{soft\_fail=True}: si el sensor expira por \code{timeout}, marca la tarea como \code{skipped} en lugar de \code{failed} (útil para entregas opcionales que no deben disparar alertas de guardia).
+  \item \code{exponential\_backoff=True} junto con \code{max\_wait}: espacia progresivamente las comprobaciones en esperas largas para no saturar APIs externas.
+\end{itemize}
+
+El Listado~\ref{lst:sensor-reschedule} muestra tanto la sintaxis clásica de \code{FileSensor} con \code{mode="reschedule"} como su equivalente moderno funcional con \code{@task.sensor}, que además permite devolver un valor vía \code{PokeReturnValue(is\_done=True, xcom\_value=...)} al completarse la espera.
+
+\begin{lstlisting}[style=python, caption={Sensores eficientes en modo \code{reschedule}: \code{FileSensor} clásico y sensor funcional \code{@task.sensor}.}, label={lst:sensor-reschedule}]
+from datetime import timedelta
+from airflow.decorators import task
+from airflow.sensors.base import PokeReturnValue
+from airflow.sensors.filesystem import FileSensor
+
+# 1. Sensor clasico con liberacion de worker slot y parametros defensivos
+esperar_fichero = FileSensor(
+    task_id="esperar_fichero",
+    fs_conn_id="fs_incoming",
+    filepath="/data/incoming/{{ ds }}.csv",
+    mode="reschedule",          # Libera el worker slot entre chequeos
+    poke_interval=300,          # Comprueba cada 5 minutos (> 60s -> reschedule)
+    timeout=6 * 60 * 60,        # Maximo 6 horas (evita el defecto de 7 dias)
+    exponential_backoff=True,   # Espacia progresivamente los chequeos
+    max_wait=timedelta(minutes=20),
+    soft_fail=False,
+)
+
+
+# 2. Sensor funcional en TaskFlow API que ademas retorna metadatos por XCom
+@task.sensor(
+    poke_interval=120,
+    timeout=3600,
+    mode="reschedule",
+    soft_fail=True,
+)
+def esperar_lote_api(ds: str | None = None) -> PokeReturnValue:
+    from airflow.providers.http.hooks.http import HttpHook
+
+    http = HttpHook(method="GET", http_conn_id="crm_api")
+    resp = http.run(f"v1/exports/{ds}/status").json()
+    if resp.get("state") == "READY":
+        return PokeReturnValue(is_done=True, xcom_value=resp["download_uri"])
+    return PokeReturnValue(is_done=False)
+\end{lstlisting}
+
+\subsection{Deferrable Operators y el componente Triggerer (\texorpdfstring{\code{deferrable=True}}{deferrable=True})}
+
+Aunque \code{mode="reschedule"} elimina el bloqueo continuo de \textit{worker slots}, sigue presentando una ineficiencia importante a gran escala, especialmente sobre \code{KubernetesExecutor}: cada vez que vence \code{poke\_interval}, Airflow debe planificar la tarea, lanzar un contenedor completo (arrancar Python, importar librerías, inicializar el entorno), ejecutar una consulta HTTP de 50 milisegundos y destruir el Pod. Para 50 sensores esperando 4 horas con chequeos cada 5 minutos, esto genera $50 \times 48 = 2\,400$ arranques de Pods efímeros y cientos de escrituras de metadatos.
+
+Para resolver definitivamente este problema, Airflow introdujo en AIP-40 los \textbf{Deferrable Operators} y un demonio ligero dedicado llamado \textbf{Triggerer}, basado en programación asíncrona nativa de Python (\pkg{asyncio}):
+
+\begin{enumerate}
+  \item \textbf{Inicio y diferimiento (\code{self.defer}):} el operador arranca brevemente en un \textit{worker}, realiza una comprobación inicial (o lanza un trabajo asíncrono en Databricks, BigQuery o EMR) y, si debe esperar, invoca \code{self.defer(trigger=..., method\_name="execute\_complete")}. Esto lanza una excepción controlada \code{TaskDeferred}.
+  \item \textbf{Liberación total del worker:} el worker captura \code{TaskDeferred}, serializa el \textit{Trigger} y sus argumentos en la tabla \code{trigger} de la Metadata DB, cambia la \code{TaskInstance} al estado \code{deferred} y \textbf{termina inmediatamente} (cero procesos Python o Pods de worker consumiendo recursos durante toda la espera).
+  \item \textbf{Espera masiva en el Triggerer:} un único proceso \textbf{Triggerer} ejecuta un bucle de eventos \pkg{asyncio} capaz de multiplexar \textbf{miles de corrutinas \code{async def run(self)} concurrentes} en un solo hilo con unos pocos cientos de megabytes de RAM, empleando clientes no bloqueantes (\pkg{aiohttp}, \pkg{aiobotocore}, \pkg{asyncpg}).
+  \item \textbf{Reanudación directa (\code{execute\_complete}):} cuando el evento externo se cumple, el \textit{Trigger} emite un \code{TriggerEvent(payload)}, el Triggerer marca la tarea como \code{scheduled} y un worker retoma la ejecución directamente en el método \code{execute\_complete(self, context, event)}, completando la tarea en milisegundos.
+\end{enumerate}
+
+En la mayoría de sensores y operadores de larga duración de los \textit{Providers} oficiales (\code{S3KeySensor}, \code{HttpSensor}, \code{BigQueryInsertJobOperator}, \code{DatabricksSubmitRunOperator}, \code{EmrAddStepsOperator}, \code{KubernetesPodOperator}), activar esta arquitectura requiere únicamente añadir \code{deferrable=True} (o globalmente \code{AIRFLOW\_\_OPERATORS\_\_DEFAULT\_DEFERRABLE=True}). El Listado~\ref{lst:deferrable-usage-y-trigger} muestra tanto su activación directa como la anatomía mínima de un \code{BaseTrigger} y un operador diferible propio.
+
+\begin{lstlisting}[style=python, caption={Uso directo de \code{deferrable=True} en \code{S3KeySensor} y anatomía interna de un \code{BaseTrigger} y operador diferible.}, label={lst:deferrable-usage-y-trigger}]
+import asyncio
+from datetime import timedelta
+from typing import Any, AsyncIterator
+from airflow.models.baseoperator import BaseOperator
+from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
+from airflow.triggers.base import BaseTrigger, TriggerEvent
+
+# 1. Activacion en una sola linea sobre un sensor oficial de AWS
+esperar_parquet_s3 = S3KeySensor(
+    task_id="esperar_parquet_s3",
+    aws_conn_id="s3_default",
+    bucket_name="analytics-raw",
+    bucket_key="ventas/dt={{ ds }}/_SUCCESS",
+    poke_interval=60,
+    timeout=4 * 3600,
+    deferrable=True,  # Delega toda la espera asincrona al proceso Triggerer
+)
+
+
+# 2. Anatomia interna: Trigger asincrono (ejecutado en el bucle asyncio del Triggerer)
+class ApiReadyTrigger(BaseTrigger):
+    def __init__(self, endpoint_url: str, poll_interval: float = 30.0):
+        super().__init__()
+        self.endpoint_url = endpoint_url
+        self.poll_interval = poll_interval
+
+    def serialize(self) -> tuple[str, dict[str, Any]]:
+        # Obligatorio: permite persistir el Trigger en la tabla trigger de la DB
+        return (
+            f"{self.__class__.__module__}.{self.__class__.__qualname__}",
+            {"endpoint_url": self.endpoint_url, "poll_interval": self.poll_interval},
+        )
+
+    async def run(self) -> AsyncIterator[TriggerEvent]:
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            while True:
+                async with session.get(self.endpoint_url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("ready"):
+                            yield TriggerEvent({"status": "ok", "batch_id": data["id"]})
+                            return
+                await asyncio.sleep(self.poll_interval)
+
+
+# 3. Operador diferible que transfiere la espera y reanuda en execute_complete
+class WaitForApiDeferrableOperator(BaseOperator):
+    template_fields = ("endpoint_url",)
+
+    def __init__(self, endpoint_url: str, poll_interval: float = 30.0, **kwargs):
+        super().__init__(**kwargs)
+        self.endpoint_url = endpoint_url
+        self.poll_interval = poll_interval
+
+    def execute(self, context: dict) -> None:
+        self.defer(
+            trigger=ApiReadyTrigger(self.endpoint_url, self.poll_interval),
+            method_name="execute_complete",
+            timeout=timedelta(hours=4),
+        )
+
+    def execute_complete(self, context: dict, event: dict[str, Any]) -> str:
+        self.log.info("Evento recibido desde Triggerer: %s", event)
+        return event["batch_id"]
+\end{lstlisting}
+
+\subsection{Comparativa cuantitativa de consumo de recursos y criterios de elección}
+
+Para visualizar el impacto real de esta decisión arquitectónica, consideremos un escenario típico de producción: \textbf{50 sensores concurrentes} esperando cada uno \textbf{4 horas} a la llegada de ficheros diarios, con un intervalo de comprobación de 5 minutos (48 chequeos por sensor) y un tiempo medio de arranque más comprobación en worker de 5 segundos por intento (o 2 segundos de inicio y 2 segundos de reanudación en el caso diferible):
+
+\begin{itemize}
+  \item \textbf{\code{mode="poke"}:} $50 \text{ slots} \times 4\text{ h} = \mathbf{200.00\text{ slot-horas}}$ bloqueados de forma continua (50 slots inmovilizados en paralelo).
+  \item \textbf{\code{mode="reschedule"}:} $50 \times 48 \times \frac{5\text{ s}}{3600\text{ s/h}} = \mathbf{3.33\text{ slot-horas}}$ totales, pero generando \textbf{2\,400 lanzamientos} de procesos/Pods y picos periódicos sobre el \textit{Scheduler}.
+  \item \textbf{\code{deferrable=True}:} $50 \times \frac{2\text{ s} + 2\text{ s}}{3600\text{ s/h}} = \mathbf{0.056\text{ slot-horas}}$ (una reducción del \textbf{99.97\%} frente a \code{poke} y del \textbf{98.3\%} frente a \code{reschedule}), con únicamente 100 breves ejecuciones de worker y cero Pods ociosos durante las 4 horas.
+\end{itemize}
+
+La Figura~\ref{fig:comparativa-slots-sensores} ilustra esta diferencia de varios órdenes de magnitud en escala logarítmica, mientras que la Tabla~\ref{tab:modos-espera} resume las ventajas, requisitos y recomendaciones de cada estrategia.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=32pt,
+    bar shift=0pt,
+    width=0.86\textwidth,
+    height=6.8cm,
+    ymode=log,
+    log origin=infty,
+    ymin=0.01,
+    ymax=1000,
+    xmin=0.4,
+    xmax=3.6,
+    ylabel={\sffamily\footnotesize\bfseries Consumo de Worker Slot-Horas (escala log)},
+    ylabel style={color=PrimaryDark},
+    xtick={1, 2, 3},
+    xticklabels={
+      {\sffamily\footnotesize\bfseries \code{mode="poke"}\\{\scriptsize (50 slots bloqueados)}},
+      {\sffamily\footnotesize\bfseries \code{mode="reschedule"}\\{\scriptsize (2\,400 arranques Pod)}},
+      {\sffamily\footnotesize\bfseries \code{deferrable=True}\\{\scriptsize (Triggerer asyncio)}}
+    },
+    xticklabel style={align=center, yshift=-3pt},
+    ymajorgrids=true,
+    grid style={dashed, color=LightBorder},
+    axis lines*=left,
+    axis line style={color=PrimaryDark},
+    tick style={color=PrimaryDark},
+    nodes near coords,
+    every node near coord/.append style={
+      font=\sffamily\footnotesize\bfseries,
+      color=PrimaryDark,
+      yshift=4pt
+    },
+    point meta=explicit symbolic,
+    title={\sffamily\small\bfseries Coste de Worker Slots para 50 sensores esperando 4 horas (intervalo 5 min)},
+    title style={color=PrimaryDark, yshift=4pt}
+]
+  \addplot[draw=CrimsonAccent, fill=CrimsonAccent!70!white] coordinates {
+    (1, 200.0) [200.0 slot-h]
+  };
+  \addplot[draw=AmberAccent, fill=AmberAccent!75!white] coordinates {
+    (2, 3.33) [3.33 slot-h]
+  };
+  \addplot[draw=TealAccent, fill=TealAccent!80!white] coordinates {
+    (3, 0.056) [0.056 slot-h]
+  };
+\end{axis}
+\end{tikzpicture}
+\caption{Comparativa cuantitativa (escala logarítmica) del consumo total de \textit{Worker Slot-Horas} para 50 sensores esperando 4 horas según la estrategia de espera elegida.}
+\label{fig:comparativa-slots-sensores}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa integral entre los tres mecanismos de espera en Apache Airflow.}
+\label{tab:modos-espera}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.8cm} C{2.3cm} C{2.5cm} C{2.6cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Modo de espera} &
+\textcolor{white}{\sffamily\bfseries Ocupación de worker slot} &
+\textcolor{white}{\sffamily\bfseries Churn de Pods (K8sExecutor)} &
+\textcolor{white}{\sffamily\bfseries Requiere Triggerer} &
+\textcolor{white}{\sffamily\bfseries Cuándo utilizarlo} \\
+\midrule
+\textbf{\code{mode="poke"}} & Continua (100\% del tiempo) & Nulo (1 Pod fijo) & \nomark{} No & Solo esperas muy cortas ($\le$ 60\,s) y baja concurrencia. \\
+\rowcolor{TableStripe}
+\textbf{\code{mode="reschedule"}} & Breve en cada \code{poke\_interval} & Alto (1 Pod por cada chequeo) & \nomark{} No & Esperas $> 60$\,s cuando el operador no soporta \code{deferrable} o no hay Triggerer. \\
+\textbf{\code{deferrable=True}} & Casi nula (solo inicio y cierre) & Mínimo (2 arranques totales) & \yesmark{} Sí (\pkg{asyncio}) & \textbf{Estándar en producción} para sensores largos y trabajos remotos (Spark, BQ, EMR, Databricks). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{warningbox}[Cuidado al escribir Triggers personalizados: nunca bloquees el \textit{event loop}]
+Dentro del método \code{async def run(self)} de un \code{BaseTrigger} personalizado, \textbf{nunca} invoques funciones síncronas bloqueantes como \code{time.sleep()}, \code{requests.get()} o clientes DB-API tradicionales (\pkg{psycopg2}). Como el \textit{Triggerer} multiplexa cientos o miles de \textit{Triggers} en un único bucle de eventos \pkg{asyncio}, una sola llamada bloqueante congela el procesamiento de todos los demás \textit{Triggers} del clúster. Utiliza siempre \code{await asyncio.sleep(...)} y bibliotecas estrictamente asíncronas (\pkg{aiohttp}, \pkg{aiobotocore}, \pkg{asyncpg}, \pkg{httpx.AsyncClient}).
+\end{warningbox}
+
+Con los fundamentos arquitectónicos de \textit{Providers}, \textit{Connections}, \textit{Secrets Backends}, \textit{Hooks} y \textit{Deferrable Operators} sólidamente establecidos, estamos preparados para recorrer en el próximo capítulo el catálogo práctico de conectores por dominio tecnológico ---desde SQL unificado y \code{ObjectStoragePath} hasta Spark, dbt, Kubernetes, Kafka y OpenLineage--- y construir paso a paso un conector propio empaquetado como \textit{Provider} instalable.

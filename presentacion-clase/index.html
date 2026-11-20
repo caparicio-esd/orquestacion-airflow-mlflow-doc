@@ -1,0 +1,2904 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Orquestación de Datos, MLOps y LLMOps — Apache Airflow 3 y MLflow 3 (Clase 2h)</title>
+  <style>
+/* ============================================================================
+   presentacion-clase/styles.css
+   Diseño lineal de ALTA LEGIBILIDAD para proyector de aula (clase 2 horas)
+   Tipografía amplia, alto contraste, sin paneles ocultos ni pestañas.
+   Soporta tema oscuro (por defecto) y tema claro para aulas luminosas (tecla T)
+   ============================================================================ */
+
+:root {
+  --bg: #08101f;
+  --bg-elev: #101b31;
+  --bg-card: #111e36;
+  --bg-card-solid: #111e36;
+  --bg-code: #0a1120;
+  --border: rgba(148, 163, 184, 0.26);
+  --border-strong: rgba(56, 189, 248, 0.50);
+
+  --text: #f4f7fb;
+  --text-muted: #cbd5e1;
+  --text-dim: #94a3b8;
+
+  --primary: #38bdf8;
+  --primary-deep: #0284c7;
+  --teal: #2dd4bf;
+  --violet: #c4b5fd;
+  --amber: #fbbf24;
+  --rose: #fb7185;
+  --emerald: #34d399;
+
+  --grad-hero: radial-gradient(circle at 14% 20%, rgba(14, 165, 233, 0.25), transparent 46%),
+               radial-gradient(circle at 86% 78%, rgba(20, 184, 166, 0.22), transparent 46%),
+               linear-gradient(135deg, #060c18 0%, #0d1a33 58%, #071626 100%);
+  --shadow-card: 0 12px 32px rgba(0, 0, 0, 0.34);
+
+  /* Syntax highlighting de alto contraste para proyector */
+  --tok-kw: #93c5fd;
+  --tok-dec: #d8b4fe;
+  --tok-str: #86efac;
+  --tok-num: #fdba74;
+  --tok-com: #94a3b8;
+  --tok-fn: #67e8f9;
+  --tok-cls: #fde047;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Menlo, Monaco, Consolas, monospace;
+}
+
+body.theme-light {
+  --bg: #f6f8fc;
+  --bg-elev: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-solid: #ffffff;
+  --bg-code: #0f172a;
+  --border: rgba(15, 23, 42, 0.16);
+  --border-strong: rgba(3, 105, 161, 0.45);
+
+  --text: #0f172a;
+  --text-muted: #334155;
+  --text-dim: #475569;
+
+  --primary: #0369a1;
+  --primary-deep: #0c4a6e;
+  --teal: #0f766e;
+  --violet: #6d28d9;
+  --amber: #b45309;
+  --rose: #be123c;
+  --emerald: #047857;
+
+  --grad-hero: radial-gradient(circle at 14% 20%, rgba(14, 165, 233, 0.16), transparent 46%),
+               radial-gradient(circle at 86% 78%, rgba(20, 184, 166, 0.14), transparent 46%),
+               linear-gradient(135deg, #eef4fc 0%, #f8fafc 58%, #e6f4f1 100%);
+  --shadow-card: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  transition: background 0.28s ease, color 0.28s ease;
+}
+
+/* ==================== TOP PROGRESS & CHROME ==================== */
+.progress-track {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 5px;
+  background: rgba(148, 163, 184, 0.16);
+  z-index: 100;
+}
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--primary), var(--teal), var(--violet));
+  transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+
+/* ==================== DECK STAGE & SLIDES ==================== */
+.deck {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.slide {
+  position: absolute;
+  inset: 0;
+  padding: 42px 68px 66px 68px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate3d(44px, 0, 0);
+  transition: opacity 0.38s cubic-bezier(0.22, 1, 0.36, 1),
+              transform 0.42s cubic-bezier(0.22, 1, 0.36, 1),
+              visibility 0.38s;
+  background: var(--bg);
+}
+
+.slide.active {
+  opacity: 1;
+  visibility: visible;
+  transform: translate3d(0, 0, 0);
+  z-index: 10;
+}
+
+.slide.prev {
+  opacity: 0;
+  transform: translate3d(-44px, 0, 0);
+  z-index: 5;
+}
+
+.slide-inner {
+  width: 100%;
+  max-width: 1360px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-height: calc(100vh - 108px);
+}
+
+/* Entrada escalonada limpia */
+.slide.active .anim {
+  animation: fadeUp 0.50s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.slide.active .anim.d1 { animation-delay: 0.05s; }
+.slide.active .anim.d2 { animation-delay: 0.13s; }
+.slide.active .anim.d3 { animation-delay: 0.21s; }
+.slide.active .anim.d4 { animation-delay: 0.29s; }
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(15px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Hero & Divisores de Bloque */
+.slide.hero, .slide.section-divider { background: var(--grad-hero); }
+.slide.section-divider .slide-inner {
+  align-items: flex-start;
+  justify-content: center;
+  max-width: 1120px;
+  gap: 22px;
+}
+.section-num {
+  font-family: var(--font-mono);
+  font-size: 80px;
+  font-weight: 850;
+  line-height: 1;
+  background: linear-gradient(135deg, var(--primary), var(--teal));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.section-title {
+  font-size: clamp(38px, 4.4vw, 60px);
+  font-weight: 850;
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  max-width: 980px;
+}
+.section-sub {
+  font-size: clamp(19px, 1.85vw, 24px);
+  color: var(--text-muted);
+  max-width: 860px;
+  line-height: 1.52;
+}
+.section-bar {
+  width: 120px;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary), var(--teal));
+}
+
+/* ==================== TIPOGRAFÍA DE ALTA LEGIBILIDAD ==================== */
+.slide-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-bottom: 1.5px solid var(--border);
+  padding-bottom: 12px;
+}
+.kicker {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--teal);
+}
+h1.hero-title {
+  font-size: clamp(42px, 5vw, 68px);
+  font-weight: 850;
+  line-height: 1.06;
+  letter-spacing: -0.03em;
+}
+h1.hero-title span.accent {
+  background: linear-gradient(90deg, var(--primary), var(--teal), var(--violet));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+h2.slide-title {
+  font-size: clamp(28px, 2.85vw, 40px);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+.lead {
+  font-size: clamp(17px, 1.45vw, 20px);
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+p, li {
+  font-size: clamp(16.5px, 1.38vw, 19.5px);
+  line-height: 1.52;
+}
+ul.clean, ol.clean {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+ul.clean { list-style: none; }
+ol.clean { padding-left: 24px; }
+ul.clean li {
+  position: relative;
+  padding-left: 22px;
+}
+ul.clean li::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 10px;
+  width: 8px; height: 8px;
+  border-radius: 2px;
+  background: var(--primary);
+}
+ul.clean.teal li::before { background: var(--teal); }
+ul.clean.amber li::before { background: var(--amber); }
+ul.clean.rose li::before { background: var(--rose); }
+ul.clean.emerald li::before { background: var(--emerald); }
+ul.clean.violet li::before { background: var(--violet); }
+
+code.inline {
+  font-family: var(--font-mono);
+  font-size: 0.87em;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--primary);
+  border: 1px solid rgba(56, 189, 248, 0.30);
+}
+
+/* ==================== LAYOUTS Y TARJETAS ==================== */
+.grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; align-items: stretch; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: stretch; }
+.grid-60-40 { display: grid; grid-template-columns: 1.35fr 1fr; gap: 24px; align-items: stretch; }
+.grid-40-60 { display: grid; grid-template-columns: 1fr 1.35fr; gap: 24px; align-items: stretch; }
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px 22px;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.card h3 {
+  font-size: clamp(18px, 1.55vw, 22px);
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.25;
+}
+.card.accent-blue { border-left: 5px solid var(--primary); }
+.card.accent-teal { border-left: 5px solid var(--teal); }
+.card.accent-amber { border-left: 5px solid var(--amber); }
+.card.accent-rose { border-left: 5px solid var(--rose); }
+.card.accent-violet { border-left: 5px solid var(--violet); }
+.card.accent-emerald { border-left: 5px solid var(--emerald); }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 11px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  width: fit-content;
+}
+.badge-blue { background: rgba(56, 189, 248, 0.18); color: var(--primary); border: 1px solid rgba(56, 189, 248, 0.42); }
+.badge-teal { background: rgba(45, 212, 191, 0.18); color: var(--teal); border: 1px solid rgba(45, 212, 191, 0.42); }
+.badge-amber { background: rgba(251, 191, 36, 0.18); color: var(--amber); border: 1px solid rgba(251, 191, 36, 0.42); }
+.badge-rose { background: rgba(251, 113, 133, 0.18); color: var(--rose); border: 1px solid rgba(251, 113, 133, 0.42); }
+.badge-violet { background: rgba(196, 181, 253, 0.18); color: var(--violet); border: 1px solid rgba(196, 181, 253, 0.42); }
+.badge-emerald { background: rgba(52, 211, 153, 0.18); color: var(--emerald); border: 1px solid rgba(52, 211, 153, 0.42); }
+
+/* ==================== BLOQUES DE CÓDIGO GRANDES Y NÍTIDOS ==================== */
+.code-wrap {
+  position: relative;
+  background: var(--bg-code);
+  border: 1.5px solid rgba(148, 163, 184, 0.26);
+  border-radius: 13px;
+  overflow: hidden;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.36);
+}
+.code-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 16px;
+  background: #17233a;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+.code-dots {
+  display: inline-flex;
+  gap: 6px;
+  margin-right: 10px;
+}
+.code-dots i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.code-dots i:nth-child(1) { background: #ef4444; }
+.code-dots i:nth-child(2) { background: #f59e0b; }
+.code-dots i:nth-child(3) { background: #22c55e; }
+
+.copy-btn {
+  background: rgba(56, 189, 248, 0.18);
+  color: #bae6fd;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+  border-radius: 7px;
+  padding: 3px 11px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.copy-btn:hover { background: rgba(56, 189, 248, 0.32); }
+
+.code-wrap pre {
+  margin: 0;
+  padding: 15px 18px;
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 450px;
+  font-family: var(--font-mono);
+  font-size: clamp(13.5px, 1.12vw, 15.5px);
+  line-height: 1.56;
+  color: #f1f5f9;
+  tab-size: 4;
+}
+.code-wrap.compact pre {
+  font-size: clamp(12.8px, 1.04vw, 14.4px);
+  line-height: 1.50;
+  padding: 13px 16px;
+}
+
+.tok-kw { color: var(--tok-kw); font-weight: 700; }
+.tok-dec { color: var(--tok-dec); font-weight: 700; }
+.tok-str { color: var(--tok-str); }
+.tok-num { color: var(--tok-num); font-weight: 600; }
+.tok-com { color: var(--tok-com); font-style: italic; }
+.tok-fn { color: var(--tok-fn); }
+.tok-cls { color: var(--tok-cls); font-weight: 700; }
+
+/* ==================== TABLAS AMPLIAS Y LEGIBLES ==================== */
+table.data-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1.5px solid var(--border);
+  border-radius: 13px;
+  overflow: hidden;
+  background: var(--bg-card);
+  font-size: clamp(14.5px, 1.22vw, 17px);
+}
+table.data-table th {
+  background: rgba(14, 165, 233, 0.22);
+  color: var(--text);
+  font-weight: 800;
+  text-align: left;
+  padding: 12px 15px;
+  border-bottom: 1.5px solid var(--border);
+}
+table.data-table td {
+  padding: 11px 15px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  line-height: 1.44;
+}
+table.data-table tr:last-child td { border-bottom: none; }
+table.data-table tbody tr:nth-child(even) { background: rgba(148, 163, 184, 0.06); }
+
+/* ==================== BANNER DEMO EN VIVO ==================== */
+.demo-banner {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.14), rgba(20, 184, 166, 0.13));
+  border: 1.5px solid var(--border-strong);
+  border-radius: 16px;
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ==================== GRÁFICOS DE BARRAS ANIMADOS ==================== */
+.bar-row {
+  display: grid;
+  grid-template-columns: 215px 1fr 125px;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.bar-track {
+  height: 28px;
+  background: rgba(148, 163, 184, 0.18);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 9px;
+  width: 0%;
+  transition: width 1.05s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.slide.active .bar-fill { width: var(--target-w); }
+
+/* ==================== DIAGRAMAS E ILUSTRACIONES SVG ANIMADAS ==================== */
+.svg-box {
+  background: #0b1528;
+  border: 1.5px solid rgba(56, 189, 248, 0.28);
+  border-radius: 14px;
+  padding: 14px 18px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.30);
+  color: #f1f5f9;
+}
+.svg-box svg { width: 100%; height: auto; max-height: 390px; display: block; }
+.svg-box.compact { padding: 10px 14px; }
+.svg-box.compact svg { max-height: 245px; }
+
+.flow-dash {
+  stroke-dasharray: 9 6;
+  animation: dashMove 1.6s linear infinite;
+}
+.flow-dash-slow {
+  stroke-dasharray: 7 7;
+  animation: dashMove 2.8s linear infinite;
+}
+@keyframes dashMove {
+  from { stroke-dashoffset: 30; }
+  to { stroke-dashoffset: 0; }
+}
+
+.pulse-node { animation: pulseSoft 3s ease-in-out infinite; }
+@keyframes pulseSoft {
+  0%, 100% { opacity: 0.94; }
+  50% { opacity: 1; filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.50)); }
+}
+
+.float-slow { animation: floatGentle 5.5s ease-in-out infinite; }
+@keyframes floatGentle {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-6px); }
+}
+
+.slide.active .draw-path {
+  stroke-dasharray: 900;
+  stroke-dashoffset: 900;
+  animation: strokeDraw 1.35s cubic-bezier(0.22, 1, 0.36, 1) 0.2s forwards;
+}
+@keyframes strokeDraw {
+  to { stroke-dashoffset: 0; }
+}
+
+.slide.active .pop-in {
+  animation: popScale 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.slide.active .pop-in.d2 { animation-delay: 0.16s; }
+.slide.active .pop-in.d3 { animation-delay: 0.28s; }
+@keyframes popScale {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.hero-bg-art {
+  position: absolute;
+  right: 4%;
+  top: 50%;
+  transform: translateY(-50%);
+  width: min(460px, 36vw);
+  opacity: 0.85;
+  pointer-events: none;
+  z-index: 0;
+}
+.slide.hero .slide-inner { position: relative; z-index: 2; }
+
+.card {
+  transition: transform 0.22s ease, border-color 0.22s ease;
+}
+.card:hover { transform: translateY(-2px); border-color: var(--border-strong); }
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-dash, .flow-dash-slow, .pulse-node, .float-slow, .draw-path, .pop-in, .anim {
+    animation: none !important;
+    transition: none !important;
+    stroke-dashoffset: 0 !important;
+  }
+}
+
+/* ==================== SCULLEY LINEAL (2 SLIDES CONSECUTIVAS) ==================== */
+.sculley-stage {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  grid-template-rows: repeat(6, 52px);
+  gap: 9px;
+  padding: 16px;
+  border-radius: 14px;
+  background: var(--bg-card);
+  border: 1.5px solid var(--border);
+}
+.sc-box {
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-weight: 800;
+  font-size: 14.5px;
+  padding: 8px;
+  border: 1.5px solid rgba(255, 255, 255, 0.16);
+}
+.sc-ml { background: linear-gradient(135deg, #f59e0b, #d97706); color: #0f172a; }
+.sc-infra { background: rgba(56, 189, 248, 0.22); color: var(--text); border-color: rgba(56, 189, 248, 0.48); }
+
+.sculley-stage.illusion .sc-ml { grid-column: 4 / 10; grid-row: 2 / 6; font-size: 32px; }
+.sculley-stage.illusion .sc-col { grid-column: 1 / 4; grid-row: 2 / 3; }
+.sculley-stage.illusion .sc-cfg { grid-column: 1 / 4; grid-row: 3 / 4; }
+.sculley-stage.illusion .sc-fea { grid-column: 1 / 4; grid-row: 4 / 5; }
+.sculley-stage.illusion .sc-ver { grid-column: 5 / 9; grid-row: 1 / 2; }
+.sculley-stage.illusion .sc-res { grid-column: 10 / 13; grid-row: 2 / 3; }
+.sculley-stage.illusion .sc-srv { grid-column: 10 / 13; grid-row: 3 / 5; }
+.sculley-stage.illusion .sc-mon { grid-column: 10 / 13; grid-row: 5 / 6; }
+.sculley-stage.illusion .sc-prc { grid-column: 3 / 7; grid-row: 6 / 7; }
+.sculley-stage.illusion .sc-ana { grid-column: 7 / 11; grid-row: 6 / 7; }
+
+.sculley-stage.reality .sc-ml { grid-column: 5 / 7; grid-row: 4 / 5; font-size: 14px; }
+.sculley-stage.reality .sc-cfg { grid-column: 1 / 3; grid-row: 2 / 6; }
+.sculley-stage.reality .sc-col { grid-column: 3 / 5; grid-row: 2 / 5; }
+.sculley-stage.reality .sc-fea { grid-column: 3 / 7; grid-row: 5 / 7; }
+.sculley-stage.reality .sc-ver { grid-column: 5 / 7; grid-row: 1 / 4; }
+.sculley-stage.reality .sc-res { grid-column: 7 / 9; grid-row: 1 / 4; }
+.sculley-stage.reality .sc-ana { grid-column: 7 / 9; grid-row: 4 / 5; }
+.sculley-stage.reality .sc-prc { grid-column: 7 / 9; grid-row: 5 / 7; }
+.sculley-stage.reality .sc-srv { grid-column: 9 / 11; grid-row: 1 / 7; background: rgba(45, 212, 191, 0.26); border-color: var(--teal); }
+.sculley-stage.reality .sc-mon { grid-column: 11 / 13; grid-row: 2 / 6; background: rgba(196, 181, 253, 0.24); border-color: var(--violet); }
+
+/* ==================== CONTROLES INFERIORES ==================== */
+.controls {
+  position: fixed;
+  bottom: 12px; left: 26px; right: 26px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  z-index: 95;
+  pointer-events: none;
+}
+.ctrl-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 5px 11px;
+  border-radius: 999px;
+}
+.ctrl-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 650;
+  padding: 5px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.18s, color 0.18s;
+}
+.ctrl-btn:hover { background: rgba(56, 189, 248, 0.18); color: var(--text); }
+.slide-counter {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  padding: 0 7px;
+}
+
+/* ==================== IMPRESIÓN A PDF ==================== */
+@media print {
+  html, body { overflow: visible; height: auto; }
+  .controls, .progress-track { display: none !important; }
+  .deck { height: auto; overflow: visible; }
+  .slide {
+    position: relative !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: none !important;
+    page-break-after: always;
+    height: 100vh;
+  }
+}
+
+  </style>
+</head>
+<body>
+  <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+
+  <main class="deck" id="deck">
+
+    <!-- ==================================================================
+         SLIDE 1: PORTADA
+    ================================================================== -->
+    <section class="slide hero">
+      <!-- Ilustración decorativa DAG + MLflow animada (suave) -->
+      <div class="hero-bg-art float-slow" aria-hidden="true">
+        <svg viewBox="0 0 420 340" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <radialGradient id="gNode" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.35"/>
+              <stop offset="100%" stop-color="#38bdf8" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+          <circle cx="220" cy="170" r="150" fill="url(#gNode)"/>
+          <!-- Rutas del grafo -->
+          <path id="hp1" d="M 55 170 C 115 170, 115 80, 185 80 L 310 80 C 350 80, 355 145, 370 170" fill="none" stroke="rgba(56,189,248,0.45)" stroke-width="2.2" class="flow-dash-slow"/>
+          <path id="hp2" d="M 55 170 C 115 170, 115 260, 185 260 L 310 260 C 350 260, 355 195, 370 170" fill="none" stroke="rgba(45,212,191,0.45)" stroke-width="2.2" class="flow-dash-slow"/>
+          <line x1="185" y1="80" x2="250" y2="170" stroke="rgba(196,181,253,0.4)" stroke-width="1.8" stroke-dasharray="4 4"/>
+          <line x1="185" y1="260" x2="250" y2="170" stroke="rgba(196,181,253,0.4)" stroke-width="1.8" stroke-dasharray="4 4"/>
+          <line x1="250" y1="170" x2="370" y2="170" stroke="rgba(52,211,153,0.55)" stroke-width="2.2"/>
+          <!-- Paquetes viajando -->
+          <circle r="4.5" fill="#38bdf8"><animateMotion dur="4.2s" repeatCount="indefinite"><mpath href="#hp1"/></animateMotion></circle>
+          <circle r="4.5" fill="#2dd4bf"><animateMotion dur="4.8s" begin="1.4s" repeatCount="indefinite"><mpath href="#hp2"/></animateMotion></circle>
+          <!-- Nodos -->
+          <g transform="translate(55,170)"><circle r="24" fill="#0d1b34" stroke="#fbbf24" stroke-width="2"/><text y="4" fill="#fbbf24" font-size="10.5" font-weight="800" text-anchor="middle" font-family="monospace">DATA</text></g>
+          <g transform="translate(185,80)"><circle r="26" fill="#0d1b34" stroke="#38bdf8" stroke-width="2.2"/><text y="4" fill="#38bdf8" font-size="10" font-weight="800" text-anchor="middle" font-family="monospace">DAG</text></g>
+          <g transform="translate(185,260)"><circle r="26" fill="#0d1b34" stroke="#2dd4bf" stroke-width="2.2"/><text y="4" fill="#2dd4bf" font-size="10" font-weight="800" text-anchor="middle" font-family="monospace">ASSET</text></g>
+          <g transform="translate(250,170)"><circle r="28" fill="#17143a" stroke="#c4b5fd" stroke-width="2.2" class="pulse-node"/><text y="4" fill="#e9d5ff" font-size="10" font-weight="800" text-anchor="middle" font-family="monospace">MLFLOW</text></g>
+          <g transform="translate(370,170)"><circle r="26" fill="#0c2824" stroke="#34d399" stroke-width="2.2"/><text y="4" fill="#6ee7b7" font-size="10" font-weight="800" text-anchor="middle" font-family="monospace">PROD</text></g>
+        </svg>
+      </div>
+      <div class="slide-inner" style="max-width:1200px;">
+        <div class="anim d1" style="display:flex;gap:10px;flex-wrap:wrap;">
+          <span class="badge badge-blue">Apache Airflow 3.0+</span>
+          <span class="badge badge-teal">Conectores &amp; Providers</span>
+          <span class="badge badge-violet">MLflow 3 · MLOps &amp; LLMOps</span>
+          <span class="badge badge-amber">Clase · 2 Horas</span>
+        </div>
+
+        <h1 class="hero-title anim d2">
+          Orquestación de Datos,<br/>
+          <span class="accent">MLOps y LLMOps en Producción</span>
+        </h1>
+
+        <p class="lead anim d3" style="max-width:880px;font-size:21px;">
+          De pipelines por lotes Medallion y conectores en <strong>Apache Airflow 3</strong> al entrenamiento reproducible,
+          <strong>Prompt Engineering</strong>, <strong>Tracing</strong> y evaluación LLM en <strong>MLflow 3</strong>.
+        </p>
+
+        <div class="grid-3 anim d4" style="margin-top:8px;">
+          <div class="card accent-blue">
+            <span class="kicker">Asignatura</span>
+            <p><strong>Ingeniería Big Data en la Nube</strong><br/><span style="color:var(--text-muted)">Grado en Ing. y Sistemas de Datos · DIT-UPM</span></p>
+          </div>
+          <div class="card accent-teal">
+            <span class="kicker">Caso Conductor en Vivo</span>
+            <p><strong>Operaciones Carrefour</strong><br/><span style="color:var(--text-muted)">Tickets TPV · Churn Club · Soporte LLM</span></p>
+          </div>
+          <div class="card accent-violet">
+            <span class="kicker">Atajos del Proyector</span>
+            <p style="font-size:15px;color:var(--text-muted)">
+              <code class="inline">← / →</code> o <code class="inline">Espacio</code> Navegar · <code class="inline">T</code> Tema claro/oscuro · <code class="inline">F</code> Pantalla completa
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 2: AGENDA DE 2 HORAS (120 MIN)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Hoja de ruta · 120 minutos exactos</span>
+          <h2 class="slide-title">Agenda de la sesión y 4 laboratorios Carrefour</h2>
+        </div>
+
+        <div class="grid-3 anim d2">
+          <div class="card accent-blue">
+            <span class="badge badge-blue">00:00 – 00:18</span>
+            <h3>1. Fundamentos</h3>
+            <p style="color:var(--text-muted)">Streaming vs. Batch, Medallion, 7 pilares y comparativa 2026.</p>
+          </div>
+          <div class="card accent-blue">
+            <span class="badge badge-blue">00:18 – 00:45</span>
+            <h3>2. Airflow 3 + Demo 1</h3>
+            <p style="color:var(--text-muted)">Airflow 2.10 → 3.0, Task SDK, XComs, idempotencia y setup Docker.</p>
+          </div>
+          <div class="card accent-teal">
+            <span class="badge badge-teal">00:45 – 01:12</span>
+            <h3>3. Conectores + Demo 2</h3>
+            <p style="color:var(--text-muted)">Providers, Secrets, Deferrable, SQL/S3/K8s y <strong>Carrefour Medallion</strong>.</p>
+          </div>
+          <div class="card accent-amber">
+            <span class="badge badge-amber">01:12 – 01:32</span>
+            <h3>4. MLOps + Demo 3</h3>
+            <p style="color:var(--text-muted)">Sculley, 11 etapas, Feature Store, Drift y <strong>RandomForest MLflow</strong>.</p>
+          </div>
+          <div class="card accent-violet">
+            <span class="badge badge-violet">01:32 – 01:52</span>
+            <h3>5. LLMOps + Demo 4</h3>
+            <p style="color:var(--text-muted)">Prompt Registry, DSPy/GEPA, Tracing y <strong>Prompt Eval Carrefour</strong>.</p>
+          </div>
+          <div class="card accent-emerald">
+            <span class="badge badge-emerald">01:52 – 02:00</span>
+            <h3>6. Integración y Cierre</h3>
+            <p style="color:var(--text-muted)">Airflow 3 + MLflow 3 end-to-end y 10 reglas de oro.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 3: DIVISOR BLOQUE 1
+    ================================================================== -->
+    <section class="slide section-divider">
+      <div class="slide-inner">
+        <span class="section-num anim d1">01</span>
+        <h2 class="section-title anim d2">¿Por qué necesitamos orquestadores de datos?</h2>
+        <div class="section-bar anim d3"></div>
+        <p class="section-sub anim d4">Streaming frente a Batch, Arquitectura Medallion, sistemas heterogéneos, los 7 pilares y el mercado actual.</p>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 4: STREAMING VS BATCH
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Paradigmas de procesamiento</span>
+          <h2 class="slide-title">Streaming frente a Batch: dos mundos complementarios</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-teal">
+            <span class="badge badge-teal">Data in motion · Latencia ms–s</span>
+            <h3>Procesamiento en Streaming</h3>
+            <ul class="clean teal">
+              <li>Procesa eventos según llegan (tiempo real o <em>micro-batching</em>).</li>
+              <li>Gestión compleja de <strong>estado</strong>, ventanas y eventos tardíos.</li>
+              <li><strong>Casos:</strong> fraude, IoT, recomendaciones en vivo, precios bursátiles.</li>
+              <li><strong>Stack:</strong> Kafka / Pulsar + Flink / Spark Streaming + Kinesis / Pub/Sub.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-blue">
+            <span class="badge badge-blue">Data at rest · Ventanas horas–días</span>
+            <h3>Procesamiento en Batch</h3>
+            <ul class="clean">
+              <li>Opera sobre grandes históricos en intervalos programados.</li>
+              <li>Recuperación sencilla mediante reintento sobre particiones.</li>
+              <li><strong>Casos:</strong> ETL en data lakes, cierres BI, entrenamiento ML, logs.</li>
+              <li><strong>Stack:</strong> Apache Spark, Snowflake/BigQuery, Trino, DuckDB.</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Ilustración animada Streaming vs Batch -->
+        <div class="svg-box compact anim d3">
+          <svg viewBox="0 0 1080 120" xmlns="http://www.w3.org/2000/svg">
+            <!-- Izquierda: Streaming -->
+            <text x="20" y="24" fill="#2dd4bf" font-size="13" font-weight="800" font-family="monospace">STREAMING · flujo continuo evento a evento</text>
+            <path id="stBelt" d="M 28 74 L 365 74" fill="none" stroke="rgba(45,212,191,0.45)" stroke-width="3" stroke-dasharray="6 5"/>
+            <circle r="7" fill="#2dd4bf"><animateMotion dur="2.6s" repeatCount="indefinite"><mpath href="#stBelt"/></animateMotion></circle>
+            <circle r="7" fill="#38bdf8"><animateMotion dur="2.6s" begin="0.85s" repeatCount="indefinite"><mpath href="#stBelt"/></animateMotion></circle>
+            <circle r="7" fill="#a78bfa"><animateMotion dur="2.6s" begin="1.7s" repeatCount="indefinite"><mpath href="#stBelt"/></animateMotion></circle>
+            <rect x="368" y="48" width="128" height="52" rx="10" fill="rgba(45,212,191,0.20)" stroke="#2dd4bf" stroke-width="2"/>
+            <text x="432" y="71" fill="#ffffff" font-size="12.5" font-weight="800" text-anchor="middle">Flink / Kafka</text>
+            <text x="432" y="89" fill="#99f6e4" font-size="11" text-anchor="middle">Latencia ms–s</text>
+
+            <line x1="540" y1="14" x2="540" y2="108" stroke="rgba(148,163,184,0.25)" stroke-width="1.5" stroke-dasharray="4 4"/>
+
+            <!-- Derecha: Batch -->
+            <text x="572" y="24" fill="#38bdf8" font-size="13" font-weight="800" font-family="monospace">BATCH · acumulación en particiones programadas</text>
+            <rect x="576" y="48" width="136" height="52" rx="9" fill="rgba(56,189,248,0.14)" stroke="#38bdf8" stroke-width="1.8"/>
+            <rect x="586" y="58" width="24" height="32" rx="4" fill="#38bdf8" opacity="0.85"/>
+            <rect x="616" y="58" width="24" height="32" rx="4" fill="#38bdf8" opacity="0.70"/>
+            <rect x="646" y="58" width="24" height="32" rx="4" fill="#38bdf8" opacity="0.55"/>
+            <rect x="676" y="58" width="24" height="32" rx="4" fill="#38bdf8" opacity="0.40"/>
+            <path id="btPipe" d="M 716 74 L 892 74" fill="none" stroke="rgba(56,189,248,0.45)" stroke-width="3" class="flow-dash"/>
+            <rect width="34" height="20" rx="5" fill="#fbbf24" x="-17" y="-10"><animateMotion dur="3.4s" repeatCount="indefinite"><mpath href="#btPipe"/></animateMotion></rect>
+            <text x="805" y="56" fill="#fbbf24" font-size="11.5" font-weight="700" text-anchor="middle" font-family="monospace">00:00 UTC</text>
+            <rect x="898" y="48" width="158" height="52" rx="10" fill="rgba(56,189,248,0.22)" stroke="#38bdf8" stroke-width="2"/>
+            <text x="977" y="71" fill="#ffffff" font-size="12.5" font-weight="800" text-anchor="middle">Spark / SQL DW</text>
+            <text x="977" y="89" fill="#bae6fd" font-size="11" text-anchor="middle">Bloque diario / TB</text>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 5: ARQUITECTURA MEDALLION (CASO CARREFOUR)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Refinamiento progresivo · Caso Carrefour</span>
+          <h2 class="slide-title">Arquitectura Medallion: de ventanas cortas al Scheduling</h2>
+        </div>
+
+        <div class="svg-box anim d2">
+          <svg viewBox="0 0 1120 335" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="arrB" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,1 L8,5 L0,9 Z" fill="#38bdf8"/></marker>
+              <marker id="arrT" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,1 L8,5 L0,9 Z" fill="#2dd4bf"/></marker>
+            </defs>
+
+            <text x="195" y="24" fill="#fbbf24" font-size="13.5" font-weight="800" text-anchor="middle" font-family="monospace">Ventanas cortas: Streaming / Ingesta</text>
+            <line x1="20" y1="33" x2="375" y2="33" stroke="#fbbf24" stroke-width="2.5" stroke-dasharray="5 4"/>
+            <text x="745" y="24" fill="#38bdf8" font-size="13.5" font-weight="800" text-anchor="middle" font-family="monospace">Ventanas largas (horas/días): Scheduling con Airflow 3</text>
+            <line x1="405" y1="33" x2="1100" y2="33" stroke="#38bdf8" stroke-width="2.5"/>
+
+            <!-- Fuentes -->
+            <rect x="20" y="55" width="165" height="180" rx="12" fill="rgba(148,163,184,0.12)" stroke="#94a3b8"/>
+            <text x="102" y="80" fill="#cbd5e1" font-size="13" font-weight="800" text-anchor="middle">FUENTES</text>
+            <rect x="32" y="96" width="141" height="36" rx="8" fill="#162847" stroke="#38bdf8"/>
+            <text x="102" y="119" fill="#f8fafc" font-size="13" font-weight="700" text-anchor="middle">Cajas TPV</text>
+            <rect x="32" y="142" width="141" height="36" rx="8" fill="#162847" stroke="#38bdf8"/>
+            <text x="102" y="165" fill="#f8fafc" font-size="13" font-weight="700" text-anchor="middle">App Carrefour</text>
+            <rect x="32" y="188" width="141" height="36" rx="8" fill="#162847" stroke="#38bdf8"/>
+            <text x="102" y="211" fill="#f8fafc" font-size="13" font-weight="700" text-anchor="middle">ERP / Drive</text>
+
+            <!-- BRONZE -->
+            <rect class="pulse-node" x="230" y="55" width="195" height="180" rx="14" fill="rgba(217,119,6,0.20)" stroke="#fbbf24" stroke-width="2.2"/>
+            <text x="327" y="85" fill="#fbbf24" font-size="17" font-weight="800" text-anchor="middle">BRONZE</text>
+            <text x="246" y="116" fill="#f8fafc" font-size="13.5">• Datos crudos</text>
+            <text x="246" y="142" fill="#f8fafc" font-size="13.5">• Schema-on-read</text>
+            <text x="246" y="168" fill="#f8fafc" font-size="13.5">• Con errores TPV</text>
+            <text x="246" y="194" fill="#f8fafc" font-size="13.5">• Base para replay</text>
+            <text x="327" y="222" fill="#fde68a" font-size="12" font-family="monospace" text-anchor="middle">bronze.tickets_raw</text>
+
+            <!-- SILVER -->
+            <rect class="pulse-node" x="470" y="55" width="205" height="180" rx="14" fill="rgba(56,189,248,0.18)" stroke="#38bdf8" stroke-width="2.2"/>
+            <text x="572" y="85" fill="#38bdf8" font-size="17" font-weight="800" text-anchor="middle">SILVER</text>
+            <text x="486" y="116" fill="#f8fafc" font-size="13.5">• Deduplicación</text>
+            <text x="486" y="142" fill="#f8fafc" font-size="13.5">• Esquema validado</text>
+            <text x="486" y="168" fill="#f8fafc" font-size="13.5">• Cuarentena errores</text>
+            <text x="486" y="194" fill="#f8fafc" font-size="13.5">• Carga idempotente</text>
+            <text x="572" y="222" fill="#bae6fd" font-size="12" font-family="monospace" text-anchor="middle">silver.tickets_clean</text>
+
+            <!-- GOLD -->
+            <rect class="pulse-node" x="720" y="55" width="200" height="180" rx="14" fill="rgba(20,184,166,0.20)" stroke="#2dd4bf" stroke-width="2.2"/>
+            <text x="820" y="85" fill="#2dd4bf" font-size="17" font-weight="800" text-anchor="middle">GOLD</text>
+            <text x="736" y="116" fill="#f8fafc" font-size="13.5">• KPIs por tienda</text>
+            <text x="736" y="142" fill="#f8fafc" font-size="13.5">• Ticket medio/socios</text>
+            <text x="736" y="168" fill="#f8fafc" font-size="13.5">• Features ML &amp; RAG</text>
+            <text x="736" y="194" fill="#f8fafc" font-size="13.5">• Emite Asset v3</text>
+            <text x="820" y="222" fill="#99f6e4" font-size="12" font-family="monospace" text-anchor="middle">gold.ventas_diarias</text>
+
+            <!-- Consumo -->
+            <rect x="960" y="55" width="142" height="180" rx="12" fill="rgba(167,139,250,0.16)" stroke="#c4b5fd"/>
+            <text x="1031" y="80" fill="#ddd6fe" font-size="13" font-weight="800" text-anchor="middle">CONSUMO</text>
+            <rect x="972" y="96" width="118" height="36" rx="8" fill="#231c42" stroke="#c4b5fd"/>
+            <text x="1031" y="119" fill="#f8fafc" font-size="13" font-weight="700" text-anchor="middle">BI / Finanzas</text>
+            <rect x="972" y="142" width="118" height="36" rx="8" fill="#231c42" stroke="#c4b5fd"/>
+            <text x="1031" y="165" fill="#f8fafc" font-size="13" font-weight="700" text-anchor="middle">MLflow RF</text>
+            <rect x="972" y="188" width="118" height="36" rx="8" fill="#231c42" stroke="#c4b5fd"/>
+            <text x="1031" y="211" fill="#f8fafc" font-size="13" font-weight="700" text-anchor="middle">Agentes LLM</text>
+
+            <!-- Flechas animadas + paquetes de datos viajando -->
+            <path id="medFlow" d="M 185 145 L 955 145" fill="none" stroke="none"/>
+            <line x1="185" y1="145" x2="225" y2="145" stroke="#38bdf8" stroke-width="3" class="flow-dash" marker-end="url(#arrB)"/>
+            <line x1="425" y1="145" x2="465" y2="145" stroke="#38bdf8" stroke-width="3" class="flow-dash" marker-end="url(#arrB)"/>
+            <line x1="675" y1="145" x2="715" y2="145" stroke="#2dd4bf" stroke-width="3" class="flow-dash" marker-end="url(#arrT)"/>
+            <line x1="920" y1="145" x2="955" y2="145" stroke="#2dd4bf" stroke-width="3" class="flow-dash" marker-end="url(#arrT)"/>
+            <circle r="5" fill="#fbbf24"><animateMotion dur="5s" repeatCount="indefinite"><mpath href="#medFlow"/></animateMotion></circle>
+            <circle r="5" fill="#2dd4bf"><animateMotion dur="5s" begin="2.5s" repeatCount="indefinite"><mpath href="#medFlow"/></animateMotion></circle>
+
+            <!-- Plano inferior -->
+            <rect x="230" y="264" width="690" height="56" rx="12" fill="#0f2544" stroke="#38bdf8" stroke-width="2"/>
+            <text x="575" y="288" fill="#ffffff" font-size="15" font-weight="800" text-anchor="middle">PLANO DE CONTROL Y SCHEDULING — APACHE AIRFLOW 3</text>
+            <text x="575" y="309" fill="#cbd5e1" font-size="13" text-anchor="middle">Dependencias DAG · Quality Gates · Idempotencia · Backfills · Alertas · Assets</text>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 6: SISTEMAS HETEROGÉNEOS VS CRON
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">El reto real de ingeniería</span>
+          <h2 class="slide-title">Orquestar sistemas heterogéneos: por qué <code class="inline">cron</code> falla</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-blue">
+            <h3>La realidad en producción</h3>
+            <ul class="clean">
+              <li>Fases en <strong>servidores y equipos distintos</strong>.</li>
+              <li>Tecnologías diversas y <strong>cajas negras</strong> (ERP, APIs SaaS, SQL, Spark, GPU).</li>
+              <li><strong>Ventanas temporales dispares</strong> y grafos complejos de dependencias.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-rose">
+            <h3>El colapso de <code class="inline">cron + bash</code></h3>
+            <ul class="clean rose">
+              <li><strong>Condiciones de carrera</strong> si una tarea tarda más de lo estimado.</li>
+              <li><strong>Sin reintentos selectivos</strong> ni recuperación desde el paso fallido.</li>
+              <li><strong>Cero alertas, cero SLAs</strong> y backfills manuales propensos a errores.</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Ilustración visual: Caos cron vs Orquestador ordenado -->
+        <div class="svg-box compact anim d3">
+          <svg viewBox="0 0 1080 155" xmlns="http://www.w3.org/2000/svg">
+            <!-- Caos Cron -->
+            <text x="240" y="22" fill="#fb7185" font-size="13.5" font-weight="800" text-anchor="middle" font-family="monospace">SIN ORQUESTADOR (cron ciego por reloj)</text>
+            <rect x="28" y="42" width="110" height="36" rx="8" fill="#2d1422" stroke="#fb7185"/><text x="83" y="65" fill="#fecdd3" font-size="12" font-weight="700" text-anchor="middle">00:00 TPV</text>
+            <rect x="28" y="98" width="110" height="36" rx="8" fill="#2d1422" stroke="#fb7185"/><text x="83" y="121" fill="#fecdd3" font-size="12" font-weight="700" text-anchor="middle">00:15 ERP</text>
+            <rect x="210" y="70" width="118" height="40" rx="8" fill="#3a1919" stroke="#f59e0b" stroke-width="2"/><text x="269" y="95" fill="#fde68a" font-size="12" font-weight="800" text-anchor="middle">00:30 ETL ??</text>
+            <rect x="385" y="42" width="110" height="36" rx="8" fill="#2d1422" stroke="#fb7185"/><text x="440" y="65" fill="#fecdd3" font-size="12" font-weight="700" text-anchor="middle">BI Vacío!</text>
+            <rect x="385" y="98" width="110" height="36" rx="8" fill="#2d1422" stroke="#fb7185"/><text x="440" y="121" fill="#fecdd3" font-size="12" font-weight="700" text-anchor="middle">ML Roto!</text>
+            <path d="M 138 60 Q 175 110 210 90" fill="none" stroke="#fb7185" stroke-width="2" stroke-dasharray="5 4"/>
+            <path d="M 138 116 Q 175 60 210 90" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="5 4"/>
+            <line x1="328" y1="84" x2="385" y2="60" stroke="#fb7185" stroke-width="2"/>
+            <line x1="328" y1="96" x2="385" y2="116" stroke="#fb7185" stroke-width="2"/>
+
+            <line x1="540" y1="12" x2="540" y2="145" stroke="rgba(148,163,184,0.28)" stroke-width="1.5" stroke-dasharray="4 4"/>
+
+            <!-- Orquestado -->
+            <text x="815" y="22" fill="#34d399" font-size="13.5" font-weight="800" text-anchor="middle" font-family="monospace">CON ORQUESTADOR (Grafo de dependencias + Reintentos)</text>
+            <rect x="576" y="42" width="110" height="36" rx="8" fill="#102840" stroke="#38bdf8"/><text x="631" y="65" fill="#e0f2fe" font-size="12" font-weight="700" text-anchor="middle">Ingesta TPV</text>
+            <rect x="576" y="98" width="110" height="36" rx="8" fill="#102840" stroke="#38bdf8"/><text x="631" y="121" fill="#e0f2fe" font-size="12" font-weight="700" text-anchor="middle">Ingesta ERP</text>
+            <rect class="pulse-node" x="748" y="66" width="136" height="44" rx="10" fill="rgba(45,212,191,0.22)" stroke="#2dd4bf" stroke-width="2"/><text x="816" y="93" fill="#ffffff" font-size="12.5" font-weight="800" text-anchor="middle">Calidad + ETL</text>
+            <rect x="944" y="42" width="112" height="36" rx="8" fill="#0d2e26" stroke="#34d399"/><text x="1000" y="65" fill="#d1fae5" font-size="12" font-weight="700" text-anchor="middle">BI Gold ✓</text>
+            <rect x="944" y="98" width="112" height="36" rx="8" fill="#0d2e26" stroke="#34d399"/><text x="1000" y="121" fill="#d1fae5" font-size="12" font-weight="700" text-anchor="middle">ML Train ✓</text>
+            <path d="M 686 60 L 748 82" fill="none" stroke="#38bdf8" stroke-width="2.4" class="flow-dash"/>
+            <path d="M 686 116 L 748 94" fill="none" stroke="#38bdf8" stroke-width="2.4" class="flow-dash"/>
+            <path d="M 884 82 L 944 60" fill="none" stroke="#34d399" stroke-width="2.4" class="flow-dash"/>
+            <path d="M 884 94 L 944 116" fill="none" stroke="#34d399" stroke-width="2.4" class="flow-dash"/>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 7: LOS 7 PILARES (1 A 4) — LINEAL Y LEGIBLE
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Requisitos de un orquestador (1 / 2)</span>
+          <h2 class="slide-title">Los 7 pilares de la orquestación: Pilares 1 al 4</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-blue">
+            <h3>1. Scheduling (Planificación)</h3>
+            <p>Automatizar ejecuciones por horario (cron) o por eventos (fichero en S3, Asset).</p>
+            <p style="color:var(--teal);font-size:16px;"><em>Ej.: ETL diario de ventas a las 00:00 listo para BI a las 07:00.</em></p>
+          </div>
+          <div class="card accent-blue">
+            <h3>2. Dependency Management</h3>
+            <p>Garantizar orden topológico en el DAG: transformar solo cuando la extracción tenga éxito.</p>
+            <p style="color:var(--teal);font-size:16px;"><em>Ej.: <code class="inline">bronze &gt;&gt; silver &gt;&gt; gold</code> sin condiciones de carrera.</em></p>
+          </div>
+          <div class="card accent-teal">
+            <h3>3. Monitoring &amp; Alerting</h3>
+            <p>Trazar estados, latencias y SLAs en tiempo real con alertas automáticas.</p>
+            <p style="color:var(--teal);font-size:16px;"><em>Ej.: alerta a Slack si un entrenamiento ML supera las 2 horas.</em></p>
+          </div>
+          <div class="card accent-teal">
+            <h3>4. Integration (Conectores)</h3>
+            <p>Catálogo amplio de conectores para bases de datos, cloud y APIs sin desarrollo artesanal.</p>
+            <p style="color:var(--teal);font-size:16px;"><em>Ej.: extraer de Google Analytics y cargar métricas en Salesforce.</em></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 8: LOS 7 PILARES (5 A 7) — LINEAL Y LEGIBLE
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Requisitos de un orquestador (2 / 2)</span>
+          <h2 class="slide-title">Los 7 pilares de la orquestación: Pilares 5 al 7</h2>
+        </div>
+
+        <div class="grid-3 anim d2">
+          <div class="card accent-violet">
+            <h3>5. Scalability</h3>
+            <p>Crecer horizontalmente en workers y asignar recursos elásticos en picos de demanda.</p>
+            <p style="color:var(--teal);font-size:16px;"><em>Ej.: motor de recomendaciones escalando en Black Friday.</em></p>
+          </div>
+          <div class="card accent-amber">
+            <h3>6. Version Control</h3>
+            <p>Pipelines como código en Git para auditoría, reproducibilidad y <em>rollback</em> inmediato.</p>
+            <p style="color:var(--teal);font-size:16px;"><em>Ej.: revertir una proyección financiera errónea en segundos.</em></p>
+          </div>
+          <div class="card accent-rose">
+            <h3>7. Error Handling</h3>
+            <p>Reintentos con <em>backoff</em> exponencial, cuarentena y rutas alternativas (<em>fallbacks</em>).</p>
+            <p style="color:var(--teal);font-size:16px;"><em>Ej.: API externa falla → 3 reintentos → conmuta a API de respaldo.</em></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 9: PANORAMA DEL MERCADO (2025-2026)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Ecosistema 2025–2026</span>
+          <h2 class="slide-title">Panorama del mercado de orquestadores</h2>
+        </div>
+
+        <table class="data-table anim d2">
+          <thead>
+            <tr><th>Orquestador</th><th>Enfoque</th><th>Punto fuerte diferencial</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Apache Airflow 2/3</strong> <span class="badge badge-blue">Estándar</span></td><td>DAGs Python + Assets</td><td>85+ Providers, estándar de facto, SaaS en AWS/GCP/Astronomer.</td></tr>
+            <tr><td><strong>Dagster / Prefect</strong></td><td>Assets / Python dinámico</td><td>Dagster destaca en activos + dbt; Prefect en ergonomía rápida.</td></tr>
+            <tr><td><strong>Apache NiFi</strong></td><td>Flujos visuales en vivo</td><td>Ingesta continua evento a evento (complementa a Airflow).</td></tr>
+            <tr><td><strong>Kubeflow / Argo</strong></td><td>Contenedores en K8s</td><td>Nativos Kubernetes para pipelines ML pesados en GPU.</td></tr>
+            <tr><td><strong>Cloud: ADF / Step Functions</strong></td><td>Gestionado low-code/JSON</td><td>Cero mantenimiento de infraestructura dentro de su nube.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 10: DIVISOR BLOQUE 2 — APACHE AIRFLOW 3
+    ================================================================== -->
+    <section class="slide section-divider">
+      <div class="slide-inner">
+        <span class="section-num anim d1">02</span>
+        <h2 class="section-title anim d2">Apache Airflow 3: Arquitectura y Diseño de DAGs</h2>
+        <div class="section-bar anim d3"></div>
+        <p class="section-sub anim d4">De Airflow 2.10 al aislamiento con Task Execution API, Task SDK, XComs, idempotencia, control de flujo y Demo 1.</p>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 11: AIRFLOW 2.10 Y POR QUÉ NACE AIRFLOW 3 (LINEAL 1/2)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Convivencia en el mercado laboral</span>
+          <h2 class="slide-title">De Airflow 2.10 a Airflow 3.0+: ¿qué cambia?</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-amber">
+            <h3>Limitaciones históricas de Airflow 2.10</h3>
+            <ul class="clean amber">
+              <li><strong>Workers con acceso directo a la BD:</strong> riesgo de seguridad y acoplamiento de librerías.</li>
+              <li><strong>Sin versionado nativo de DAGs:</strong> un despliegue a mitad de run rompía la trazabilidad.</li>
+              <li><strong>Solo Python</strong> en los workers y backfills bloqueantes por CLI.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-teal">
+            <h3>Guía rápida de migración 2.10 → 3.0+</h3>
+            <ul class="clean teal">
+              <li><code class="inline">airflow.decorators</code> → <code class="inline">airflow.sdk</code></li>
+              <li><code class="inline">schedule_interval</code> → <code class="inline">schedule</code></li>
+              <li><code class="inline">days_ago(1)</code> → <code class="inline">datetime(2026, 1, 1)</code></li>
+              <li><code class="inline">Dataset</code> → <code class="inline">Asset</code> · <code class="inline">webserver</code> → <code class="inline">api-server</code></li>
+              <li>Auditoría automática: <code class="inline">ruff check --select AIR30</code></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 12: ARQUITECTURA DE AIRFLOW 3.0+ (LINEAL 2/2)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Nuevo estándar cliente-servidor (AIP-72)</span>
+          <h2 class="slide-title">Arquitectura interna de Apache Airflow 3.0+</h2>
+        </div>
+
+        <div class="svg-box anim d2">
+          <svg viewBox="0 0 1060 320" xmlns="http://www.w3.org/2000/svg">
+            <!-- Plano de Control -->
+            <rect x="16" y="16" width="600" height="286" rx="14" fill="rgba(56,189,248,0.07)" stroke="#38bdf8" stroke-width="1.8" stroke-dasharray="6 4"/>
+            <text x="316" y="40" fill="#38bdf8" font-size="14" font-weight="800" text-anchor="middle">PLANO DE CONTROL (Único con acceso a Metadata DB)</text>
+
+            <rect x="36" y="58" width="170" height="68" rx="10" fill="rgba(251,191,36,0.18)" stroke="#fbbf24" stroke-width="1.6"/>
+            <text x="121" y="87" fill="#fbbf24" font-size="14" font-weight="800" text-anchor="middle">DAG Bundles</text>
+            <text x="121" y="108" fill="#e2e8f0" font-size="12" text-anchor="middle">Git / Versionado</text>
+
+            <rect x="230" y="58" width="170" height="68" rx="10" fill="#162847" stroke="#38bdf8" stroke-width="1.6"/>
+            <text x="315" y="87" fill="#ffffff" font-size="14" font-weight="800" text-anchor="middle">DAG Processor</text>
+            <text x="315" y="108" fill="#cbd5e1" font-size="12" text-anchor="middle">Parseo aislado</text>
+
+            <rect x="424" y="58" width="172" height="68" rx="10" fill="rgba(196,181,253,0.18)" stroke="#c4b5fd" stroke-width="1.6"/>
+            <text x="510" y="87" fill="#ede9fe" font-size="14" font-weight="800" text-anchor="middle">Nueva UI React</text>
+            <text x="510" y="108" fill="#cbd5e1" font-size="12" text-anchor="middle">Tasks + Assets</text>
+
+            <rect x="36" y="150" width="170" height="72" rx="10" fill="#0f2544" stroke="#38bdf8" stroke-width="1.6"/>
+            <text x="121" y="180" fill="#ffffff" font-size="14" font-weight="800" text-anchor="middle">Scheduler</text>
+            <text x="121" y="201" fill="#bae6fd" font-size="12" text-anchor="middle">Backfills + Assets</text>
+
+            <rect x="230" y="150" width="170" height="72" rx="10" fill="rgba(56,189,248,0.24)" stroke="#38bdf8" stroke-width="2.2"/>
+            <text x="315" y="180" fill="#ffffff" font-size="15" font-weight="800" text-anchor="middle">Metadata DB</text>
+            <text x="315" y="201" fill="#e0f2fe" font-size="12.5" text-anchor="middle">PostgreSQL</text>
+
+            <rect class="pulse-node" x="424" y="150" width="172" height="72" rx="10" fill="rgba(45,212,191,0.24)" stroke="#2dd4bf" stroke-width="2.2"/>
+            <text x="510" y="178" fill="#5eead4" font-size="15" font-weight="800" text-anchor="middle">API Server</text>
+            <text x="510" y="200" fill="#f8fafc" font-size="12" text-anchor="middle">FastAPI + Task API</text>
+
+            <rect x="230" y="240" width="170" height="48" rx="9" fill="rgba(45,212,191,0.16)" stroke="#2dd4bf"/>
+            <text x="315" y="269" fill="#5eead4" font-size="13.5" font-weight="700" text-anchor="middle">Triggerer (asyncio)</text>
+
+            <!-- Frontera de seguridad -->
+            <line x1="654" y1="14" x2="654" y2="306" stroke="#fb7185" stroke-width="3" stroke-dasharray="7 5"/>
+            <text x="674" y="160" fill="#fb7185" font-size="12.5" font-weight="800" transform="rotate(-90 674 160)" text-anchor="middle">SECURITY BOUNDARY · CERO ACCESO DIRECTO BD</text>
+
+            <!-- Plano de Ejecución -->
+            <rect x="706" y="16" width="338" height="286" rx="14" fill="rgba(45,212,191,0.07)" stroke="#2dd4bf" stroke-width="1.8" stroke-dasharray="6 4"/>
+            <text x="875" y="40" fill="#2dd4bf" font-size="14" font-weight="800" text-anchor="middle">PLANO DE EJECUCIÓN AISLADO</text>
+
+            <rect x="730" y="64" width="290" height="66" rx="10" fill="rgba(45,212,191,0.18)" stroke="#2dd4bf" stroke-width="1.6"/>
+            <text x="875" y="92" fill="#ffffff" font-size="14.5" font-weight="800" text-anchor="middle">Workers Python (Task SDK)</text>
+            <text x="875" y="114" fill="#cbd5e1" font-size="12.5" text-anchor="middle">Local / Celery / Pods Kubernetes</text>
+
+            <rect x="730" y="146" width="290" height="66" rx="10" fill="rgba(56,189,248,0.16)" stroke="#38bdf8" stroke-width="1.6"/>
+            <text x="875" y="174" fill="#ffffff" font-size="14.5" font-weight="800" text-anchor="middle">Workers Multi-lenguaje</text>
+            <text x="875" y="196" fill="#cbd5e1" font-size="12.5" text-anchor="middle">Go · Rust · Java vía OpenAPI</text>
+
+            <rect x="730" y="228" width="290" height="58" rx="10" fill="rgba(251,191,36,0.18)" stroke="#fbbf24" stroke-width="1.6"/>
+            <text x="875" y="253" fill="#fde68a" font-size="14.5" font-weight="800" text-anchor="middle">Edge Workers Remotos</text>
+            <text x="875" y="273" fill="#e2e8f0" font-size="12.5" text-anchor="middle">On-premise / GPUs (solo HTTPS)</text>
+
+            <line x1="596" y1="184" x2="730" y2="184" stroke="#2dd4bf" stroke-width="3" class="flow-dash"/>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 13: CONCEPTOS FUNDAMENTALES Y ESTADOS DE TASKINSTANCE
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Modelo mental de ejecución</span>
+          <h2 class="slide-title">DAG, Task, DagRun y estados de una <code class="inline">TaskInstance</code></h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-blue">
+            <p><strong>DAG &amp; Tasks:</strong> grafo acíclico en Python formado por operadores de <strong>Acción</strong>, <strong>Transferencia</strong> o <strong>Sensores</strong>.</p>
+          </div>
+          <div class="card accent-teal">
+            <p><strong>DagRun &amp; TaskInstance:</strong> cada ejecución concreta para un <code class="inline">logical_date</code> o evento de <code class="inline">Asset</code>.</p>
+          </div>
+        </div>
+
+        <div class="svg-box anim d3">
+          <svg viewBox="0 0 1050 230" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="stA" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,1 L8,5 L0,9 Z" fill="#38bdf8"/></marker>
+              <marker id="stT" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,1 L8,5 L0,9 Z" fill="#2dd4bf"/></marker>
+              <marker id="stR" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,1 L8,5 L0,9 Z" fill="#fb7185"/></marker>
+              <marker id="stY" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,1 L8,5 L0,9 Z" fill="#fbbf24"/></marker>
+            </defs>
+
+            <rect x="20" y="92" width="130" height="54" rx="10" fill="#1e293b" stroke="#94a3b8" stroke-width="1.5"/>
+            <text x="85" y="117" fill="#ffffff" font-size="14.5" font-weight="800" text-anchor="middle" font-family="monospace">none</text>
+            <text x="85" y="136" fill="#cbd5e1" font-size="11.5" text-anchor="middle">Sin evaluar</text>
+
+            <rect x="210" y="92" width="142" height="54" rx="10" fill="rgba(56,189,248,0.18)" stroke="#38bdf8" stroke-width="1.6"/>
+            <text x="281" y="117" fill="#38bdf8" font-size="14.5" font-weight="800" text-anchor="middle" font-family="monospace">scheduled</text>
+            <text x="281" y="136" fill="#e2e8f0" font-size="11.5" text-anchor="middle">Lista para cola</text>
+
+            <rect x="415" y="92" width="135" height="54" rx="10" fill="rgba(56,189,248,0.18)" stroke="#38bdf8" stroke-width="1.6"/>
+            <text x="482" y="117" fill="#38bdf8" font-size="14.5" font-weight="800" text-anchor="middle" font-family="monospace">queued</text>
+            <text x="482" y="136" fill="#e2e8f0" font-size="11.5" text-anchor="middle">En Executor</text>
+
+            <rect class="pulse-node" x="615" y="92" width="148" height="54" rx="10" fill="rgba(14,165,233,0.30)" stroke="#38bdf8" stroke-width="2.4"/>
+            <text x="689" y="117" fill="#ffffff" font-size="15" font-weight="800" text-anchor="middle" font-family="monospace">running</text>
+            <text x="689" y="136" fill="#bae6fd" font-size="11.5" text-anchor="middle">En Worker Slot</text>
+
+            <rect x="850" y="92" width="170" height="54" rx="10" fill="rgba(52,211,153,0.22)" stroke="#34d399" stroke-width="2.4"/>
+            <text x="935" y="117" fill="#34d399" font-size="15" font-weight="800" text-anchor="middle" font-family="monospace">success</text>
+            <text x="935" y="136" fill="#d1fae5" font-size="11.5" text-anchor="middle">Exit 0 · OK</text>
+
+            <rect x="615" y="12" width="160" height="46" rx="9" fill="rgba(45,212,191,0.22)" stroke="#2dd4bf" stroke-width="1.6"/>
+            <text x="695" y="34" fill="#5eead4" font-size="13.5" font-weight="800" text-anchor="middle" font-family="monospace">deferred</text>
+            <text x="695" y="50" fill="#e2e8f0" font-size="11" text-anchor="middle">Triggerer (0 slots)</text>
+
+            <rect x="395" y="12" width="165" height="46" rx="9" fill="rgba(251,191,36,0.20)" stroke="#fbbf24" stroke-width="1.6"/>
+            <text x="477" y="34" fill="#fbbf24" font-size="13.5" font-weight="800" text-anchor="middle" font-family="monospace">up_for_retry</text>
+            <text x="477" y="50" fill="#fef3c7" font-size="11" text-anchor="middle">Espera backoff</text>
+
+            <rect x="615" y="174" width="148" height="46" rx="9" fill="rgba(251,113,133,0.22)" stroke="#fb7185" stroke-width="1.6"/>
+            <text x="689" y="196" fill="#fb7185" font-size="13.5" font-weight="800" text-anchor="middle" font-family="monospace">failed</text>
+            <text x="689" y="212" fill="#ffe4e6" font-size="11" text-anchor="middle">Retries agotados</text>
+
+            <rect x="210" y="174" width="155" height="46" rx="9" fill="#1e293b" stroke="#94a3b8"/>
+            <text x="287" y="196" fill="#e2e8f0" font-size="13.5" font-weight="800" text-anchor="middle" font-family="monospace">skipped</text>
+            <text x="287" y="212" fill="#cbd5e1" font-size="11" text-anchor="middle">Rama omitida</text>
+
+            <line x1="150" y1="119" x2="205" y2="119" stroke="#38bdf8" stroke-width="2.4" marker-end="url(#stA)"/>
+            <line x1="352" y1="119" x2="410" y2="119" stroke="#38bdf8" stroke-width="2.4" marker-end="url(#stA)"/>
+            <line x1="550" y1="119" x2="610" y2="119" stroke="#38bdf8" stroke-width="2.4" marker-end="url(#stA)"/>
+            <line x1="763" y1="119" x2="845" y2="119" stroke="#2dd4bf" stroke-width="2.6" marker-end="url(#stT)"/>
+            <line x1="689" y1="92" x2="689" y2="62" stroke="#2dd4bf" stroke-width="2.2" class="flow-dash" marker-end="url(#stT)"/>
+            <path d="M 615 24 L 281 24 L 281 88" fill="none" stroke="#2dd4bf" stroke-width="1.8" stroke-dasharray="5 3" marker-end="url(#stT)"/>
+            <line x1="635" y1="92" x2="560" y2="58" stroke="#fbbf24" stroke-width="2" marker-end="url(#stY)"/>
+            <line x1="395" y1="45" x2="328" y2="90" stroke="#fbbf24" stroke-width="2" marker-end="url(#stY)"/>
+            <line x1="689" y1="146" x2="689" y2="170" stroke="#fb7185" stroke-width="2.4" marker-end="url(#stR)"/>
+            <path d="M 85 146 L 85 197 L 205 197" fill="none" stroke="#94a3b8" stroke-width="1.8" stroke-dasharray="5 3"/>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 14: SINTAXIS CLÁSICA VS TASKFLOW (LINEAL 1/2)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Autoría de DAGs (1 / 2)</span>
+          <h2 class="slide-title">Sintaxis Clásica frente a TaskFlow API</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Sintaxis Clásica (PythonOperator)</span></div>
+            <pre><code data-lang="python">from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+def procesar(): return 5 ** 2
+def cerrar(): print("Fin")
+
+with DAG("mi_dag", schedule="@hourly", ...) as dag:
+    t1 = PythonOperator(
+        task_id="procesar", python_callable=procesar
+    )
+    t2 = PythonOperator(
+        task_id="cerrar", python_callable=cerrar
+    )
+    t1 &gt;&gt; t2  # Dependencia manual explícita</code></pre>
+          </div>
+
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>TaskFlow API (@dag y @task)</span></div>
+            <pre><code data-lang="python">from datetime import datetime
+from airflow.sdk import dag, task
+
+@dag(dag_id="mi_dag_tf", start_date=datetime(2026, 1, 1),
+     schedule="@hourly", catchup=False)
+def flujo():
+    @task
+    def procesar() -&gt; int:
+        return 5 ** 2
+
+    @task
+    def cerrar(resultado: int) -&gt; None:
+        print(f"Recibido por XCom: {resultado}")
+
+    cerrar(procesar())  # Dependencia + XCom automáticos
+
+flujo()</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 15: AIRFLOW 3 TASK SDK + ASSETS (LINEAL 2/2)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Autoría de DAGs (2 / 2) · Airflow 3</span>
+          <h2 class="slide-title">Programación reactiva con <code class="inline">Asset</code> en el Task SDK</h2>
+        </div>
+
+        <!-- Ilustración Asset-Driven Scheduling Airflow 3 -->
+        <div class="svg-box compact anim d2">
+          <svg viewBox="0 0 1060 104" xmlns="http://www.w3.org/2000/svg">
+            <path id="assetPipe" d="M 270 52 L 775 52" fill="none" stroke="none"/>
+            <rect x="24" y="20" width="246" height="64" rx="11" fill="#102840" stroke="#38bdf8" stroke-width="2"/>
+            <text x="147" y="47" fill="#7dd3fc" font-size="13.5" font-weight="800" text-anchor="middle">DAG 1 · Productor</text>
+            <text x="147" y="68" fill="#cbd5e1" font-size="11.5" font-family="monospace" text-anchor="middle">outlets=[VENTAS_GOLD]</text>
+
+            <rect class="pulse-node" x="372" y="16" width="316" height="72" rx="14" fill="rgba(45,212,191,0.22)" stroke="#2dd4bf" stroke-width="2.4"/>
+            <text x="530" y="45" fill="#5eead4" font-size="14.5" font-weight="800" text-anchor="middle">Asset (Evento de Datos)</text>
+            <text x="530" y="68" fill="#f0fdfa" font-size="11.5" font-family="monospace" text-anchor="middle">postgres://carrefour_dw/gold/ventas</text>
+
+            <rect x="786" y="20" width="250" height="64" rx="11" fill="rgba(52,211,153,0.18)" stroke="#34d399" stroke-width="2"/>
+            <text x="911" y="47" fill="#6ee7b7" font-size="13.5" font-weight="800" text-anchor="middle">DAG 2 · Consumidor</text>
+            <text x="911" y="68" fill="#d1fae5" font-size="11.5" font-family="monospace" text-anchor="middle">schedule=[VENTAS_GOLD]</text>
+
+            <line x1="270" y1="52" x2="372" y2="52" stroke="#38bdf8" stroke-width="2.8" class="flow-dash"/>
+            <line x1="688" y1="52" x2="786" y2="52" stroke="#34d399" stroke-width="2.8" class="flow-dash"/>
+            <circle r="5" fill="#2dd4bf"><animateMotion dur="3.0s" repeatCount="indefinite"><mpath href="#assetPipe"/></animateMotion></circle>
+          </svg>
+        </div>
+
+        <div class="code-wrap compact anim d3">
+          <div class="code-head">
+            <span><span class="code-dots"><i></i><i></i><i></i></span>Productor y Consumidor desacoplados con Asset (Airflow 3)</span>
+            <button class="copy-btn">Copiar</button>
+          </div>
+          <pre><code data-lang="python">from datetime import datetime
+from airflow.sdk import Asset, dag, task
+
+# 1. El activo de datos como contrato compartido entre equipos
+VENTAS_GOLD = Asset("postgres://carrefour_dw/gold/ventas_diarias_tienda")
+
+@dag(dag_id="carrefour_batch", start_date=datetime(2026, 1, 1), schedule="@daily", catchup=False)
+def productor():
+    @task(outlets=[VENTAS_GOLD])         # Emite evento al actualizar la tabla Gold
+    def agregar_a_gold(ds: str = ""):
+        ...
+    agregar_a_gold()
+
+# 2. El DAG consumidor se dispara automáticamente al actualizarse el Asset (sin cron acoplado!)
+@dag(dag_id="carrefour_alertas", start_date=datetime(2026, 1, 1), schedule=[VENTAS_GOLD], catchup=False)
+def consumidor():
+    @task
+    def auditar_ventas(): ...
+    auditar_ventas()</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 16: XCOMS Y EL ANTI-PATRÓN CRÍTICO
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">La regla de oro de Airflow</span>
+          <h2 class="slide-title">XComs y el anti-patrón crítico: Airflow orquesta, no procesa</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-rose">
+            <span class="badge badge-rose">MAL · Satura BD y RAM</span>
+            <div class="code-wrap compact">
+              <pre><code data-lang="python">@task
+def extraer():
+    # 10 GB de tickets en memoria del Worker
+    df = pd.read_parquet("s3://carrefour/raw/")
+    return df   # Intenta serializar 10 GB en BD (max ~48 KB)
+
+@task
+def transformar(df):
+    return df.dropna()</code></pre>
+            </div>
+          </div>
+
+          <div class="card accent-emerald">
+            <span class="badge badge-emerald">BIEN · Solo punteros (&lt; 1 KB)</span>
+            <div class="code-wrap compact">
+              <pre><code data-lang="python">@task
+def extraer(ds: str = "") -&gt; str:
+    uri = f"s3://carrefour/bronze/dt={ds}.parquet"
+    volcar_desde_fuente(uri)
+    return uri  # Solo el path viaja por XCom
+
+@task
+def transformar(uri_bronze: str) -&gt; str:
+    return uri_bronze.replace("bronze", "silver")</code></pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Ilustración XCom 10GB crash vs URI ligera -->
+        <div class="svg-box compact anim d3">
+          <svg viewBox="0 0 1080 120" xmlns="http://www.w3.org/2000/svg">
+            <!-- Izquierda: MAL -->
+            <rect x="20" y="34" width="128" height="54" rx="10" fill="#2d1422" stroke="#fb7185" stroke-width="2"/>
+            <text x="84" y="57" fill="#fecdd3" font-size="13" font-weight="800" text-anchor="middle">DataFrame</text>
+            <text x="84" y="75" fill="#fb7185" font-size="12" font-weight="800" text-anchor="middle">10 GB</text>
+            <line x1="148" y1="61" x2="275" y2="61" stroke="#fb7185" stroke-width="5" stroke-dasharray="6 4"/>
+            <rect x="278" y="42" width="118" height="38" rx="8" fill="#3a1620" stroke="#fb7185" stroke-width="2"/>
+            <text x="337" y="65" fill="#fda4af" font-size="12" font-weight="800" text-anchor="middle">XCom (48 KB)</text>
+            <text x="445" y="66" fill="#fb7185" font-size="15" font-weight="800" text-anchor="middle">OOM / Crash!</text>
+
+            <line x1="540" y1="12" x2="540" y2="108" stroke="rgba(148,163,184,0.28)" stroke-width="1.5" stroke-dasharray="4 4"/>
+
+            <!-- Derecha: BIEN -->
+            <rect x="572" y="16" width="132" height="40" rx="9" fill="#0d2e26" stroke="#34d399" stroke-width="2"/>
+            <text x="638" y="41" fill="#d1fae5" font-size="12.5" font-weight="800" text-anchor="middle">Task Extraer</text>
+            <path id="xcGood" d="M 704 36 L 928 36" fill="none" stroke="#34d399" stroke-width="2.4" class="flow-dash"/>
+            <circle r="4.5" fill="#34d399"><animateMotion dur="2.6s" repeatCount="indefinite"><mpath href="#xcGood"/></animateMotion></circle>
+            <text x="816" y="25" fill="#6ee7b7" font-size="11.5" font-weight="700" text-anchor="middle" font-family="monospace">XCom: "s3://.../dt=ds" (60 bytes)</text>
+            <rect x="932" y="16" width="128" height="40" rx="9" fill="#0d2e26" stroke="#34d399" stroke-width="2"/>
+            <text x="996" y="41" fill="#d1fae5" font-size="12.5" font-weight="800" text-anchor="middle">Task Spark/SQL</text>
+            <!-- S3 debajo -->
+            <rect x="748" y="68" width="136" height="38" rx="9" fill="#102840" stroke="#38bdf8" stroke-width="1.8"/>
+            <text x="816" y="92" fill="#bae6fd" font-size="12.5" font-weight="800" text-anchor="middle">S3 / GCS (10 GB)</text>
+            <path d="M 638 56 L 638 87 L 744 87" fill="none" stroke="#38bdf8" stroke-width="2" class="flow-dash-slow"/>
+            <path d="M 884 87 L 996 87 L 996 58" fill="none" stroke="#38bdf8" stroke-width="2" class="flow-dash-slow"/>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 17: IDEMPOTENCIA Y LOGICAL_DATE / BACKFILL
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Fiabilidad y semántica temporal</span>
+          <h2 class="slide-title">Idempotencia, <code class="inline">logical_date</code> y Backfills</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-blue">
+            <h3>Tres niveles de SQL</h3>
+            <div class="code-wrap compact">
+              <pre><code data-lang="sql">-- MAL: reejecutar duplica filas
+INSERT INTO ventas VALUES ('2026-11-20', 1234.5);
+
+-- BIEN: UPSERT idempotente
+INSERT INTO ventas VALUES ('{{ ds }}', 1234.5)
+ON CONFLICT (fecha) DO UPDATE SET total = EXCLUDED.total;
+
+-- MEJOR: sobrescribir partición de forma atómica
+DELETE FROM ventas WHERE fecha = '{{ ds }}';
+INSERT INTO ventas SELECT ... WHERE fecha = '{{ ds }}';</code></pre>
+            </div>
+          </div>
+
+          <div class="card accent-teal">
+            <h3><code class="inline">logical_date</code> vs. <em>wall-clock time</em></h3>
+            <div class="svg-box compact" style="margin:2px 0;">
+              <svg viewBox="0 0 500 128" xmlns="http://www.w3.org/2000/svg">
+                <line x1="26" y1="68" x2="474" y2="68" stroke="#64748b" stroke-width="2.2"/>
+                <rect x="78" y="46" width="234" height="44" rx="9" fill="rgba(56,189,248,0.22)" stroke="#38bdf8" stroke-width="2"/>
+                <text x="195" y="73" fill="#f0f9ff" font-size="13.5" font-weight="800" text-anchor="middle">data_interval (día 20 Abr)</text>
+                <circle cx="78" cy="68" r="7" fill="#38bdf8"/>
+                <circle class="pulse-node" cx="312" cy="68" r="8" fill="#2dd4bf" stroke="#ffffff" stroke-width="2"/>
+                <text x="78" y="28" fill="#38bdf8" font-size="12.5" font-weight="800" text-anchor="middle">logical_date ({{ ds }})</text>
+                <text x="78" y="112" fill="#cbd5e1" font-size="11.5" text-anchor="middle">20 Abr 00:00</text>
+                <text x="325" y="28" fill="#2dd4bf" font-size="12.5" font-weight="800" text-anchor="middle">Disparo real (Wall-clock)</text>
+                <text x="312" y="112" fill="#5eead4" font-size="11.5" font-weight="700" text-anchor="middle">21 Abr 00:00</text>
+              </svg>
+            </div>
+            <ul class="clean teal">
+              <li>Filtra siempre por <code class="inline">{{ ds }}</code>, jamás por <code class="inline">datetime.now()</code>.</li>
+              <li><strong><code class="inline">catchup=False</code></strong> en dev; usa <strong>Backfills nativos</strong> de Airflow 3 solo con tareas idempotentes.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 18: PATRONES AVANZADOS DE CONTROL DE FLUJO
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Patrones de producción</span>
+          <h2 class="slide-title">Branching, TaskGroups, Mapeo Dinámico y Setup/Teardown</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Branching + TriggerRule + TaskGroup</span></div>
+            <pre><code data-lang="python">@task.branch
+def evaluar_drift(psi: float) -&gt; str:
+    return "reentrenar" if psi &gt;= 0.20 else "omitir"
+
+@task_group(group_id="validaciones")
+def validar():
+    check_schema() &gt;&gt; check_nulls()
+
+# Obligatorio tras un branch para no quedar skipped:
+@task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+def notificar_slack(): ...</code></pre>
+          </div>
+
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Dynamic Task Mapping + Setup/Teardown</span></div>
+            <pre><code data-lang="python"># Crea 1 tarea paralela por cada tienda descubierta
+procesar_tienda.partial(fecha="{{ ds }}").expand(
+    tienda_id=listar_tiendas()
+)
+
+# Setup/Teardown garantiza apagar el clúster aunque falle
+crear_emr.as_setup() &gt;&gt; spark_job &gt;&gt; apagar_emr.as_teardown()</code></pre>
+          </div>
+        </div>
+
+        <div class="card accent-amber anim d3">
+          <p><strong>Cuidado con el <em>Top-Level Code</em>:</strong> el DAG Processor parsea cada 30 s — nunca ejecutes queries ni llamadas HTTP fuera de las tareas. Valida el <code class="inline">DagBag</code> en CI con <code class="inline">pytest</code>.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 19: LIVE DEMO 1 — EJERCICIO 01 (AIRFLOW 3 + POSTGRES)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Laboratorio en directo · 5 minutos</span>
+          <h2 class="slide-title">LIVE DEMO 1: Levantar Airflow 3 + PostgreSQL (Carrefour)</h2>
+        </div>
+
+        <div class="demo-banner anim d2">
+          <span class="badge badge-blue">ejercicios-clase/01_airflow3_levantar_entorno/ · Solo 2 contenedores</span>
+          <div class="code-wrap">
+            <div class="code-head">
+              <span><span class="code-dots"><i></i><i></i><i></i></span>Terminal — Arranque en 1 comando</span>
+              <button class="copy-btn">Copiar</button>
+            </div>
+            <pre><code data-lang="bash">cd ejercicios-clase/01_airflow3_levantar_entorno
+docker compose up -d          # Postgres 16 (carrefour_dw) + Airflow 3.1 standalone
+./verificar_entorno.sh        # Verifica tablas bronze/silver/gold + API Server
+
+# Abrir UI React: http://localhost:8080  ->  Lanzar DAG: hola_airflow3_carrefour</code></pre>
+          </div>
+          <p style="font-size:17px;">Comprobamos en vivo la nueva <strong>UI React</strong>, la conexión inyectada por entorno (<code class="inline">AIRFLOW_CONN_CARREFOUR_PG</code>) y el DAG <code class="inline">00_hola_airflow3.py</code> con <code class="inline">PostgresHook</code>.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 20: DIVISOR BLOQUE 3 — CONECTIVIDAD Y CONECTORES
+    ================================================================== -->
+    <section class="slide section-divider">
+      <div class="slide-inner">
+        <span class="section-num anim d1">03</span>
+        <h2 class="section-title anim d2">Conectividad y Conectores en Apache Airflow</h2>
+        <div class="section-bar anim d3"></div>
+        <p class="section-sub anim d4">Providers, Connections, Secrets Backends, Deferrable Operators, catálogo por dominio, Custom Providers y Demo 2 (Carrefour).</p>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 21: PROVIDERS, CONNECTIONS Y SECRETS BACKENDS
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Arquitectura de conectividad</span>
+          <h2 class="slide-title">Providers, Connections, Secrets Backends y Hooks</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-blue">
+            <h3>Pila en 4 capas (85+ Providers)</h3>
+            <ul class="clean">
+              <li><strong>Connections:</strong> credenciales y endpoints fuera del código (<code class="inline">conn_id</code>, <code class="inline">extra</code> JSON).</li>
+              <li><strong>Hooks (<code class="inline">BaseHook</code>):</strong> interfaz Python que gestiona sesiones y autenticación.</li>
+              <li><strong>Operators / Transfers:</strong> tareas declarativas con Jinja.</li>
+              <li><strong>Sensors &amp; Triggers:</strong> espera asíncrona de eventos.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-teal">
+            <h3>Resolución de secretos (<em>first-hit-wins</em>)</h3>
+            <ol class="clean">
+              <li><strong>Secrets Backend externo</strong> (AWS Secrets Manager, HashiCorp Vault, GCP, Azure) <span class="badge badge-teal">Solo lectura</span></li>
+              <li><strong>Variables de entorno</strong> (<code class="inline">AIRFLOW_CONN_*</code> en URI o JSON).</li>
+              <li><strong>Metadata DB</strong> cifrada con <code class="inline">FERNET_KEY</code>.</li>
+            </ol>
+            <p style="font-size:15.5px;color:var(--text-muted)">En cloud prioriza <strong>IAM Roles / IRSA / Workload Identity</strong> sin contraseñas estáticas.</p>
+          </div>
+        </div>
+
+        <!-- Ilustración cadena de conectividad y secretos -->
+        <div class="svg-box compact anim d3">
+          <svg viewBox="0 0 1080 112" xmlns="http://www.w3.org/2000/svg">
+            <path id="secFlow" d="M 185 56 L 915 56" fill="none" stroke="none"/>
+            <rect x="20" y="24" width="165" height="64" rx="10" fill="rgba(45,212,191,0.20)" stroke="#2dd4bf" stroke-width="2"/>
+            <text x="102" y="51" fill="#5eead4" font-size="13" font-weight="800" text-anchor="middle">1. Vault / AWS SM</text>
+            <text x="102" y="71" fill="#e2e8f0" font-size="11.5" text-anchor="middle">Prioridad máxima</text>
+
+            <rect x="235" y="24" width="165" height="64" rx="10" fill="rgba(56,189,248,0.18)" stroke="#38bdf8" stroke-width="1.8"/>
+            <text x="317" y="51" fill="#7dd3fc" font-size="13" font-weight="800" text-anchor="middle">2. AIRFLOW_CONN_*</text>
+            <text x="317" y="71" fill="#cbd5e1" font-size="11.5" text-anchor="middle">Env Var (Docker/CI)</text>
+
+            <rect x="450" y="24" width="160" height="64" rx="10" fill="rgba(251,191,36,0.18)" stroke="#fbbf24" stroke-width="1.8"/>
+            <text x="530" y="51" fill="#fde68a" font-size="13" font-weight="800" text-anchor="middle">3. Metadata DB</text>
+            <text x="530" y="71" fill="#e2e8f0" font-size="11.5" text-anchor="middle">Cifrado Fernet</text>
+
+            <rect class="pulse-node" x="665" y="24" width="165" height="64" rx="10" fill="rgba(196,181,253,0.20)" stroke="#c4b5fd" stroke-width="2"/>
+            <text x="747" y="51" fill="#ede9fe" font-size="13.5" font-weight="800" text-anchor="middle">Hook (BaseHook)</text>
+            <text x="747" y="71" fill="#cbd5e1" font-size="11.5" text-anchor="middle">Sesión + SecretsMasker</text>
+
+            <rect x="885" y="24" width="175" height="64" rx="10" fill="rgba(52,211,153,0.20)" stroke="#34d399" stroke-width="2"/>
+            <text x="972" y="51" fill="#6ee7b7" font-size="13.5" font-weight="800" text-anchor="middle">Sistema Externo</text>
+            <text x="972" y="71" fill="#d1fae5" font-size="11.5" text-anchor="middle">Postgres · S3 · API</text>
+
+            <line x1="185" y1="56" x2="235" y2="56" stroke="#2dd4bf" stroke-width="2.4" class="flow-dash"/>
+            <line x1="400" y1="56" x2="450" y2="56" stroke="#38bdf8" stroke-width="2.4" class="flow-dash"/>
+            <line x1="610" y1="56" x2="665" y2="56" stroke="#c4b5fd" stroke-width="2.4" class="flow-dash"/>
+            <line x1="830" y1="56" x2="885" y2="56" stroke="#34d399" stroke-width="2.6" class="flow-dash"/>
+            <circle r="4.5" fill="#2dd4bf"><animateMotion dur="3.8s" repeatCount="indefinite"><mpath href="#secFlow"/></animateMotion></circle>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 22: SENSORES Y DEFERRABLE OPERATORS
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Espera asíncrona sin bloquear workers</span>
+          <h2 class="slide-title">Sensores: <code class="inline">poke</code> vs. <code class="inline">reschedule</code> vs. <code class="inline">deferrable=True</code></h2>
+        </div>
+
+        <div class="card anim d2">
+          <h3>Escenario real: 50 sensores esperando 4 horas (chequeo cada 5 min)</h3>
+          <div class="bar-row">
+            <span style="font-family:var(--font-mono);font-size:15px;font-weight:700;color:var(--rose);">mode="poke"</span>
+            <div class="bar-track"><div class="bar-fill" style="--target-w:100%;background:linear-gradient(90deg,#ef4444,#fb7185);"></div></div>
+            <span style="font-family:var(--font-mono);font-size:15px;font-weight:800;color:var(--rose);">200.0 slot-h</span>
+          </div>
+          <div class="bar-row">
+            <span style="font-family:var(--font-mono);font-size:15px;font-weight:700;color:var(--amber);">mode="reschedule"</span>
+            <div class="bar-track"><div class="bar-fill" style="--target-w:22%;background:linear-gradient(90deg,#d97706,#fbbf24);"></div></div>
+            <span style="font-family:var(--font-mono);font-size:15px;font-weight:800;color:var(--amber);">3.33 slot-h</span>
+          </div>
+          <div class="bar-row" style="margin-bottom:4px;">
+            <span style="font-family:var(--font-mono);font-size:15px;font-weight:700;color:var(--emerald);">deferrable=True</span>
+            <div class="bar-track"><div class="bar-fill" style="--target-w:4%;background:linear-gradient(90deg,#059669,#2dd4bf);"></div></div>
+            <span style="font-family:var(--font-mono);font-size:15px;font-weight:800;color:var(--emerald);">0.056 slot-h</span>
+          </div>
+        </div>
+
+        <div class="code-wrap compact anim d3">
+          <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Sensor deferrable: -99.97% consumo de worker slots</span></div>
+          <pre><code data-lang="python">esperar_lote = S3KeySensor(
+    task_id="esperar_tpv_carrefour", aws_conn_id="aws_prod",
+    bucket_name="carrefour-landing", bucket_key="tpv/dt={{ ds }}/_SUCCESS",
+    deferrable=True, poke_interval=300, timeout=6 * 3600,  # Delega la espera al Triggerer asyncio
+)</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 23: CONECTORES 1 — SQL UNIFICADO Y OBJECTSTORAGEPATH
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Catálogo de conectores (1 / 4) · Bases de datos y Object Storage</span>
+          <h2 class="slide-title"><code class="inline">SQLExecuteQueryOperator</code> y <code class="inline">ObjectStoragePath</code></h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>common.sql — Postgres, Snowflake, BigQuery</span></div>
+            <pre><code data-lang="python">cargar_gold = SQLExecuteQueryOperator(
+    task_id="agregar_ventas_gold",
+    conn_id="carrefour_pg",
+    sql="sql/ventas_gold.sql",        # SQL externo limpio
+    parameters={"fecha": "{{ ds }}"}, # Anti SQL-Injection
+)
+
+gate_sql = SQLColumnCheckOperator(
+    task_id="validar_gold", conn_id="carrefour_pg",
+    table="gold.ventas_diarias_tienda",
+    column_mapping={"facturacion_eur": {"min": {"geq_to": 0}}},
+)</code></pre>
+          </div>
+
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>common.io — S3, GCS y Azure con API pathlib</span></div>
+            <pre><code data-lang="python">from airflow.sdk import ObjectStoragePath
+
+@task
+def copiar_entre_nubes(ds: str = "") -&gt; str:
+    src = ObjectStoragePath(
+        f"s3://carrefour-raw/dt={ds}.parquet", conn_id="aws_prod"
+    )
+    dst = ObjectStoragePath(
+        f"gs://carrefour-bak/dt={ds}.parquet", conn_id="gcp_prod"
+    )
+    src.copy(dst)       # Streaming sin código boto3/gcs
+    return str(dst)     # Solo el URI viaja por XCom</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 24: CONECTORES 2 — KUBERNETESPODOPERATOR (AISLAMIENTO Y GPU)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Catálogo de conectores (2 / 4) · Contenedores y GPU</span>
+          <h2 class="slide-title"><code class="inline">KubernetesPodOperator</code>: aislamiento total de cómputo</h2>
+        </div>
+
+        <div class="grid-60-40 anim d2">
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Pod efímero con GPU + XCom sidecar + deferrable</span></div>
+            <pre><code data-lang="python">entrenar_gpu = KubernetesPodOperator(
+    task_id="entrenar_modelo_gpu",
+    namespace="mlops",
+    image="registry.empresa.es/ml/pytorch:2.5",
+    cmds=["python", "train.py", "--fecha", "{{ ds }}"],
+    container_resources=k8s.V1ResourceRequirements(
+        requests={"cpu": "4", "memory": "16Gi", "nvidia.com/gpu": "1"},
+        limits={"nvidia.com/gpu": "1"},
+    ),
+    do_xcom_push=True,      # Captura /airflow/xcom/return.json
+    deferrable=True,        # No bloquea worker mientras entrena
+    is_delete_operator_pod=True,
+)</code></pre>
+          </div>
+
+          <div class="card accent-teal">
+            <h3>Aislamiento de cómputo</h3>
+            <div class="svg-box compact">
+              <svg viewBox="0 0 430 225" xmlns="http://www.w3.org/2000/svg">
+                <rect x="14" y="72" width="132" height="80" rx="11" fill="#0f2544" stroke="#38bdf8" stroke-width="2"/>
+                <text x="80" y="106" fill="#ffffff" font-size="13" font-weight="800" text-anchor="middle">Airflow Control</text>
+                <text x="80" y="128" fill="#bae6fd" font-size="11" text-anchor="middle">Workers 0.5 vCPU</text>
+
+                <rect class="pulse-node" x="218" y="14" width="198" height="54" rx="10" fill="rgba(45,212,191,0.20)" stroke="#2dd4bf" stroke-width="2"/>
+                <text x="317" y="38" fill="#5eead4" font-size="13" font-weight="800" text-anchor="middle">Pod Efímero GPU</text>
+                <text x="317" y="56" fill="#e2e8f0" font-size="11" text-anchor="middle">PyTorch + CUDA (pago/uso)</text>
+
+                <rect x="218" y="84" width="198" height="54" rx="10" fill="rgba(56,189,248,0.18)" stroke="#38bdf8" stroke-width="1.8"/>
+                <text x="317" y="108" fill="#7dd3fc" font-size="13" font-weight="800" text-anchor="middle">Pod Rust / R / Legacy</text>
+                <text x="317" y="126" fill="#e2e8f0" font-size="11" text-anchor="middle">0 conflictos de librerías</text>
+
+                <rect x="218" y="154" width="198" height="54" rx="10" fill="rgba(196,181,253,0.18)" stroke="#c4b5fd" stroke-width="1.8"/>
+                <text x="317" y="178" fill="#ede9fe" font-size="13" font-weight="800" text-anchor="middle">XCom Sidecar</text>
+                <text x="317" y="196" fill="#e2e8f0" font-size="11" text-anchor="middle">/airflow/xcom/return.json</text>
+
+                <path d="M 146 98 L 218 41" fill="none" stroke="#2dd4bf" stroke-width="2.2" class="flow-dash"/>
+                <path d="M 146 112 L 218 112" fill="none" stroke="#38bdf8" stroke-width="2.2" class="flow-dash"/>
+                <path d="M 218 181 L 146 130" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-dasharray="5 4"/>
+              </svg>
+            </div>
+            <p style="font-size:15px;color:var(--text-muted)">La GPU solo se reserva los minutos que corre el Pod y se destruye al terminar.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 25: CONECTORES 3 — SPARK Y DBT (COSMOS)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Catálogo de conectores (3 / 4) · Cómputo distribuido y SQL analítico</span>
+          <h2 class="slide-title">Orquestando Apache Spark y <code class="inline">dbt</code> correctamente</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Spark: EMR / Databricks / SparkKubernetes</span></div>
+            <pre><code data-lang="python">from airflow.providers.databricks.operators.databricks import (
+    DatabricksRunNowOperator
+)
+
+refinar_tb = DatabricksRunNowOperator(
+    task_id="spark_silver_carrefour",
+    databricks_conn_id="databricks_prod",
+    job_id=4821,
+    notebook_params={"fecha": "{{ ds }}"},
+    deferrable=True,  # Delega espera al Triggerer
+)</code></pre>
+          </div>
+
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>dbt con Astronomer Cosmos (1 modelo = 1 tarea)</span></div>
+            <pre><code data-lang="python">from cosmos import DbtTaskGroup, ProjectConfig
+
+# Evita el anti-patrón caja negra BashOperator("dbt run")
+modelos_gold = DbtTaskGroup(
+    group_id="dbt_gold_carrefour",
+    project_config=ProjectConfig("/opt/airflow/dbt"),
+    profile_config=profile_pg,
+)
+
+ingesta_bronze() &gt;&gt; modelos_gold &gt;&gt; publicar_bi()</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 26: CONECTORES 4 — APIS REST, KAFKA Y OPENLINEAGE
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Catálogo de conectores (4 / 4) · APIs, Streaming y Linaje</span>
+          <h2 class="slide-title">APIs REST (<code class="inline">HttpHook</code>), Kafka y OpenLineage</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>REST paginado con HttpHook + volcado a S3</span></div>
+            <pre><code data-lang="python">@task
+def extraer_proveedores(ds: str = "") -&gt; str:
+    hook = HttpHook(method="GET", http_conn_id="api_erp")
+    cursor, items = None, []
+    while True:
+        data = hook.run("/v2/articulos",
+                        data={"since": ds, "cursor": cursor}).json()
+        items.extend(data["items"])
+        if not (cursor := data.get("next_cursor")):
+            break
+    return escribir_parquet_s3(items, f"s3://raw/dt={ds}.parquet")</code></pre>
+          </div>
+
+          <div class="card accent-violet">
+            <h3>Streaming y Observabilidad</h3>
+            <ul class="clean violet">
+              <li><strong>Apache Kafka:</strong> <code class="inline">AwaitMessageTriggerFunctionSensor</code> espera eventos de cierre de TPV de forma <em>deferrable</em> (puente Streaming ↔ Batch).</li>
+              <li><strong>Notifiers (<code class="inline">BaseNotifier</code>):</strong> <code class="inline">SlackWebhookNotifier</code> y Teams con enlace directo a logs al fallar una tarea.</li>
+              <li><strong>OpenLineage:</strong> captura automáticamente linaje de tablas SQL, S3 y dbt hacia <strong>Marquez / DataHub</strong>.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 27: CUSTOM PROVIDER (CREAR TU PROPIO CONECTOR)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Extensibilidad empresarial</span>
+          <h2 class="slide-title">Crear tu propio Conector (Custom Provider)</h2>
+        </div>
+
+        <div class="grid-60-40 anim d2">
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Hook + Trigger asíncrono + Operator deferrable</span></div>
+            <pre><code data-lang="python">class MiCrmHook(BaseHook):
+    conn_type = "micrm"
+    def get_conn(self):
+        c = self.get_connection(self.crm_conn_id)
+        return crear_sesion(c.host, c.password)
+
+class MiCrmTrigger(BaseTrigger):
+    async def run(self):
+        while not await job_listo_async(self.job_id):
+            await asyncio.sleep(15)   # Nunca time.sleep()!
+        yield TriggerEvent({"uri": self.uri})
+
+class MiCrmExportOperator(BaseOperator):
+    def execute(self, ctx):
+        jid = MiCrmHook(self.conn_id).lanzar_export()
+        self.defer(trigger=MiCrmTrigger(jid), method_name="done")
+    def done(self, ctx, event): return event["uri"]</code></pre>
+          </div>
+
+          <div class="card accent-blue">
+            <h3>Empaquetado y pruebas</h3>
+            <ul class="clean">
+              <li>Se publica en <code class="inline">pyproject.toml</code> con <code class="inline">entry_points</code> (<code class="inline">apache_airflow_provider</code>).</li>
+              <li>Airflow registra el nuevo tipo de Connection automáticamente en la UI.</li>
+              <li>Probado en CI con <code class="inline">pytest</code> + mocks sin llamadas de red reales.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 28: LIVE DEMO 2 — CARREFOUR MEDALLION + ASSET
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Laboratorio en directo · Caso Carrefour</span>
+          <h2 class="slide-title">LIVE DEMO 2: Refinado por Batches Medallion + Asset en Airflow 3</h2>
+        </div>
+
+        <div class="demo-banner anim d2">
+          <span class="badge badge-teal">Bronze (83 filas) → Silver (71 válidas + 12 cuarentena) → Gold (5 tiendas) → Asset</span>
+          <div class="code-wrap compact">
+            <div class="code-head">
+              <span><span class="code-dots"><i></i><i></i><i></i></span>ejercicios-clase/02_airflow3_carrefour_medallion_db/</span>
+              <button class="copy-btn">Copiar</button>
+            </div>
+            <pre><code data-lang="bash"># 1. Prueba rápida local de lógica + idempotencia (2 s)
+python3 ejercicios-clase/02_airflow3_carrefour_medallion_db/probar_logica_sin_airflow.py
+
+# 2. Desplegar los 2 DAGs en Airflow 3 (Medallion + Alerta reactiva por Asset)
+cp ejercicios-clase/02_airflow3_carrefour_medallion_db/solucion/*.py \
+   ejercicios-clase/01_airflow3_levantar_entorno/dags/
+
+# 3. Verificar resultados Gold en PostgreSQL tras ejecutar en UI (:8080)
+docker exec clase-carrefour-postgres psql -U airflow -d carrefour_dw -c \
+  "SELECT tienda_id, nombre_tienda, num_tickets, facturacion_eur, pct_socios_club
+   FROM gold.ventas_diarias_tienda ORDER BY facturacion_eur DESC;"</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 29: DIVISOR BLOQUE 4 — MLOPS Y MLFLOW CLÁSICO
+    ================================================================== -->
+    <section class="slide section-divider">
+      <div class="slide-inner">
+        <span class="section-num anim d1">04</span>
+        <h2 class="section-title anim d2">MLOps y MLflow Clásico: Del Experimento a Producción</h2>
+        <div class="section-bar anim d3"></div>
+        <p class="section-sub anim d4">Deuda técnica en ML, ciclo de vida en 11 etapas, Feature Stores, Drift, MLflow Tracking, Aliases y Demo 3 (RandomForest).</p>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 30: EL MALENTENDIDO COMÚN — LA ILUSIÓN (LINEAL 1/2)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">¿Por qué MLOps? (1 / 2)</span>
+          <h2 class="slide-title">El malentendido común: creer que todo es el modelo</h2>
+        </div>
+
+        <div class="sculley-stage illusion anim d2">
+          <div class="sc-box sc-ml">ML Code</div>
+          <div class="sc-box sc-infra sc-col">Data Collection</div>
+          <div class="sc-box sc-infra sc-cfg">Configuration</div>
+          <div class="sc-box sc-infra sc-fea">Feature Extraction</div>
+          <div class="sc-box sc-infra sc-ver">Data Verification</div>
+          <div class="sc-box sc-infra sc-res">Resource Mgmt</div>
+          <div class="sc-box sc-infra sc-srv">Serving Infra</div>
+          <div class="sc-box sc-infra sc-mon">Monitoring</div>
+          <div class="sc-box sc-infra sc-prc">Process Mgmt</div>
+          <div class="sc-box sc-infra sc-ana">Analysis Tools</div>
+        </div>
+
+        <p class="lead anim d3">Mucha gente asume que MLOps consiste únicamente en entrenar un modelo en un notebook y servirlo tras una API REST...</p>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 31: EL MALENTENDIDO COMÚN — LA REALIDAD (SCULLEY ET AL. 2/2)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">¿Por qué MLOps? (2 / 2) · Sculley et al., Google (NeurIPS 2015)</span>
+          <h2 class="slide-title">La realidad en producción: el código ML es apenas el 5%</h2>
+        </div>
+
+        <div class="sculley-stage reality anim d2">
+          <div class="sc-box sc-ml">ML Code</div>
+          <div class="sc-box sc-infra sc-cfg">Configuration</div>
+          <div class="sc-box sc-infra sc-col">Data Collection</div>
+          <div class="sc-box sc-infra sc-fea">Feature Extraction</div>
+          <div class="sc-box sc-infra sc-ver">Data Verification</div>
+          <div class="sc-box sc-infra sc-res">Machine Resource Mgmt</div>
+          <div class="sc-box sc-infra sc-ana">Analysis Tools</div>
+          <div class="sc-box sc-infra sc-prc">Process Mgmt Tools</div>
+          <div class="sc-box sc-infra sc-srv">Serving Infrastructure</div>
+          <div class="sc-box sc-infra sc-mon">Monitoring</div>
+        </div>
+
+        <p class="lead anim d3">Un modelo en producción <strong>no es un binario estático</strong>: sus datos cambian, su calidad se degrada y hay que validar, versionar, monitorizar y reentrenar continuamente.</p>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 32: CICLO DE VIDA COMPLETO DEL ML (11 ETAPAS)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Intersección ML + Ingeniería de Datos + Operaciones</span>
+          <h2 class="slide-title">El ciclo de vida completo del ML en 4 macro-fases (11 etapas)</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-blue">
+            <span class="badge badge-blue">Fases 1 y 2 · Datos y Preprocesado</span>
+            <ol class="clean">
+              <li><strong>Carga de datos:</strong> ingesta, linaje y <em>Data Contracts</em>.</li>
+              <li><strong>EDA:</strong> distribuciones, clases desbalanceadas y colinealidad.</li>
+              <li><strong>Transformación:</strong> <em>Feature Engineering</em> en pipelines reutilizables.</li>
+              <li><strong>Validación continua:</strong> <em>quality gates</em> (Pandera / Great Expectations).</li>
+              <li><strong>Split Train/Val/Test:</strong> temporal/estratificado sin <em>data leakage</em>.</li>
+            </ol>
+          </div>
+
+          <div class="card accent-teal">
+            <span class="badge badge-teal">Fases 3 y 4 · Aprendizaje y Producción</span>
+            <ol start="6" class="clean">
+              <li><strong>Construcción:</strong> baseline primero + HPO (Optuna) y regularización.</li>
+              <li><strong>Validación:</strong> métrica alineada a negocio + <em>sliced evaluation</em>.</li>
+              <li><strong>Entrenamiento a escala:</strong> Spark ML, Ray Train, DDP, BF16.</li>
+              <li><strong>Despliegue (Roll-out):</strong> Shadow, Canary, A/B, Blue/Green.</li>
+              <li><strong>Serving + 11. Monitorización:</strong> REST/Batch/Streaming + Drift → CT.</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 33: FEATURE STORES Y DRIFT
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Degradación silenciosa en producción</span>
+          <h2 class="slide-title">Feature Stores y Detección de Drift (PSI)</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-blue">
+            <h3>Feature Stores (p. ej. Feast)</h3>
+            <ul class="clean">
+              <li><strong>Elimina el <em>training-serving skew</em>:</strong> evita calcular <code class="inline">edad</code> distinto en Pandas (entrenamiento) y Java (inferencia).</li>
+              <li><strong>Offline Store</strong> (Parquet/DW con <em>point-in-time joins</em>) + <strong>Online Store</strong> (Redis/DynamoDB en ms).</li>
+            </ul>
+          </div>
+
+          <div class="card accent-rose">
+            <h3>Tipos de Drift y disparo de reentreno</h3>
+            <ul class="clean rose" style="gap:6px;">
+              <li><strong>Data Drift:</strong> cambia <em>P</em>(<em>X</em>) · <strong>Concept:</strong> <em>P</em>(<em>Y</em>|<em>X</em>) · <strong>Label:</strong> <em>P</em>(<em>Y</em>).</li>
+            </ul>
+            <!-- Curva animada de Drift PSI vs F1 -->
+            <div class="svg-box compact" style="margin-top:4px;">
+              <svg viewBox="0 0 470 155" xmlns="http://www.w3.org/2000/svg">
+                <line x1="40" y1="128" x2="445" y2="128" stroke="#64748b" stroke-width="1.6"/>
+                <line x1="40" y1="128" x2="40" y2="16" stroke="#64748b" stroke-width="1.6"/>
+                <!-- Umbral PSI 0.25 -->
+                <line x1="40" y1="62" x2="445" y2="62" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="5 4"/>
+                <text x="442" y="55" fill="#fb7185" font-size="11" font-weight="800" text-anchor="end">Umbral PSI = 0.25 → Reentreno Airflow</text>
+                <!-- Curva PSI subiendo -->
+                <path class="draw-path" d="M 48 118 Q 140 114, 210 95 T 335 42 L 360 112 L 435 110" fill="none" stroke="#fbbf24" stroke-width="3"/>
+                <!-- Curva F1 cayendo y recuperando -->
+                <path class="draw-path" d="M 48 32 Q 160 35, 240 52 T 335 98 L 360 34 L 435 32" fill="none" stroke="#34d399" stroke-width="2.6"/>
+                <circle class="pulse-node" cx="335" cy="42" r="6.5" fill="#fb7185" stroke="#ffffff" stroke-width="2"/>
+                <text x="85" y="25" fill="#34d399" font-size="11.5" font-weight="800">F1-score</text>
+                <text x="115" y="112" fill="#fbbf24" font-size="11.5" font-weight="800">PSI (Drift)</text>
+                <text x="372" y="145" fill="#38bdf8" font-size="11" font-weight="700" text-anchor="middle">Nuevo @champion ✓</text>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 34: MLFLOW — LOS 4 PILARES Y ARQUITECTURA REMOTA
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Plataforma MLOps Open-Source</span>
+          <h2 class="slide-title">MLflow: los 4 pilares y arquitectura de producción</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-blue">
+            <h3>1. Tracking (Cuaderno del Data Scientist)</h3>
+            <p>Registra runs, parámetros, métricas, artefactos, datasets y código. Responde a: <em>¿qué experimentos probé y cómo fueron?</em></p>
+          </div>
+          <div class="card accent-violet">
+            <h3>2. Model Registry (Release del MLE)</h3>
+            <p>Versiones inmutables, <strong>Aliases</strong> (<code class="inline">@champion</code>), tags y gobierno. Responde a: <em>¿qué modelo está aprobado en producción?</em></p>
+          </div>
+          <div class="card accent-teal">
+            <h3>3. MLflow Models y 4. Projects</h3>
+            <p>Empaquetado multi-flavour (<code class="inline">MLmodel</code>, <code class="inline">pyfunc</code>, firmas) listo para REST, Docker o Kubernetes + entornos reproducibles.</p>
+          </div>
+          <div class="card accent-amber">
+            <h3>Arquitectura remota en producción</h3>
+            <div class="svg-box compact">
+              <svg viewBox="0 0 480 120" xmlns="http://www.w3.org/2000/svg">
+                <rect x="10" y="34" width="102" height="52" rx="9" fill="#102840" stroke="#38bdf8" stroke-width="1.8"/>
+                <text x="61" y="57" fill="#e0f2fe" font-size="11.5" font-weight="800" text-anchor="middle">Airflow / DS</text>
+                <text x="61" y="74" fill="#94a3b8" font-size="10.5" text-anchor="middle">train.py</text>
+
+                <rect class="pulse-node" x="152" y="28" width="132" height="64" rx="10" fill="rgba(45,212,191,0.22)" stroke="#2dd4bf" stroke-width="2"/>
+                <text x="218" y="56" fill="#5eead4" font-size="12.5" font-weight="800" text-anchor="middle">MLflow Server</text>
+                <text x="218" y="75" fill="#e2e8f0" font-size="10.5" text-anchor="middle">REST + UI (:5000)</text>
+
+                <rect x="330" y="10" width="140" height="44" rx="8" fill="rgba(56,189,248,0.18)" stroke="#38bdf8" stroke-width="1.8"/>
+                <text x="400" y="30" fill="#7dd3fc" font-size="11.5" font-weight="800" text-anchor="middle">PostgreSQL</text>
+                <text x="400" y="45" fill="#cbd5e1" font-size="10" text-anchor="middle">Metadatos + Registry</text>
+
+                <rect x="330" y="66" width="140" height="44" rx="8" fill="rgba(251,191,36,0.18)" stroke="#fbbf24" stroke-width="1.8"/>
+                <text x="400" y="86" fill="#fde68a" font-size="11.5" font-weight="800" text-anchor="middle">S3 / MinIO</text>
+                <text x="400" y="101" fill="#e2e8f0" font-size="10" text-anchor="middle">Modelos + Artefactos</text>
+
+                <line x1="112" y1="60" x2="152" y2="60" stroke="#2dd4bf" stroke-width="2.4" class="flow-dash"/>
+                <path d="M 284 52 L 330 32" fill="none" stroke="#38bdf8" stroke-width="2.2" class="flow-dash"/>
+                <path d="M 284 68 L 330 88" fill="none" stroke="#fbbf24" stroke-width="2.2" class="flow-dash"/>
+              </svg>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 35: MLFLOW TRACKING Y ALIASES VS STAGES
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Buenas prácticas en MLflow 2.9+ / 3.x</span>
+          <h2 class="slide-title"><code class="inline">log_metric</code> vs. <code class="inline">log_param</code> y paso de Stages a Aliases</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Tracking limpio + firma + skops seguro</span></div>
+            <pre><code data-lang="python"># MAL: accuracy como param (texto no graficable)
+# mlflow.log_param("accuracy", accuracy)
+
+# BIEN: separar hiperparámetros y métricas
+mlflow.log_params({"n_estimators": 150, "max_depth": 14})
+mlflow.log_metrics({"f1": f1, "roc_auc": auc})
+
+# Firma tipada + skops_trusted_types (MLflow 3.18+)
+mlflow.sklearn.log_model(
+    sk_model=model, name="random_forest_model",
+    signature=infer_signature(X_train, model.predict(X_train)),
+    skops_trusted_types=["sklearn.tree._tree.Tree"],
+)</code></pre>
+          </div>
+
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Model Registry moderno con Aliases</span></div>
+            <pre><code data-lang="python">client = MlflowClient()
+mv = mlflow.register_model(
+    f"runs:/{run_id}/random_forest_model",
+    "carrefour_churn_rf",
+)
+
+# Los antiguos Stages (Staging/Production) están deprecados
+# Estándar actual: Aliases flexibles + Tags de auditoría
+client.set_model_version_tag("carrefour_churn_rf", mv.version,
+                             "validation_status", "passed")
+client.set_registered_model_alias("carrefour_churn_rf",
+                                  "champion", mv.version)
+
+# Carga desacoplada en serving:
+m = mlflow.pyfunc.load_model("models:/carrefour_churn_rf@champion")</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 36: LIVE DEMO 3 — RANDOMFOREST CLUB CARREFOUR
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Laboratorio en directo · ML clásico con MLflow 3</span>
+          <h2 class="slide-title">LIVE DEMO 3: RandomForest (Churn Club Carrefour)</h2>
+        </div>
+
+        <div class="demo-banner anim d2">
+          <span class="badge badge-amber">ejercicios-clase/03_mlflow_carrefour_randomforest/ · 2.500 clientes · 24% churn</span>
+          <div class="grid-60-40">
+            <div class="code-wrap compact">
+              <div class="code-head">
+                <span><span class="code-dots"><i></i><i></i><i></i></span>Baseline → Sweep 6 runs → Registry @champion</span>
+                <button class="copy-btn">Copiar</button>
+              </div>
+              <pre><code data-lang="bash">cd ejercicios-clase/03_mlflow_carrefour_randomforest
+uv venv .venv &amp;&amp; source .venv/bin/activate
+uv pip install -r requirements.txt
+
+python solucion/01_baseline_sin_mlflow.py
+python solucion/02_mlflow_tracking_y_sweep.py
+python solucion/03_registry_aliases_y_inferencia.py
+mlflow ui --backend-store-uri sqlite:///mlflow_carrefour.db --port 5000</code></pre>
+            </div>
+
+            <div class="card">
+              <h3>Resultados reales verificados</h3>
+              <ul class="clean emerald">
+                <li><code class="inline">trees=50, depth=4</code> → F1 <strong>0.7584</strong></li>
+                <li><code class="inline">trees=150, depth=8</code> → F1 <strong>0.8297</strong></li>
+                <li><strong><code class="inline">trees=150, depth=14</code> → F1 0.8387 · AUC 0.9651 ★</strong></li>
+                <li>Promoción automática a <code class="inline">@champion</code> + matriz PNG.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 37: DIVISOR BLOQUE 5 — LLMOPS Y PROMPT ENGINEERING EN MLFLOW 3
+    ================================================================== -->
+    <section class="slide section-divider">
+      <div class="slide-inner">
+        <span class="section-num anim d1">05</span>
+        <h2 class="section-title anim d2">LLMOps, Prompt Engineering y Agentes en MLflow 3</h2>
+        <div class="section-bar anim d3"></div>
+        <p class="section-sub anim d4">Prompt Registry, optimización automática con DSPy/GEPA, Tracing OpenTelemetry, evaluación con LLM-as-a-Judge, AI Gateway y Demo 4.</p>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 38: DEL MLOPS AL LLMOPS — ¿QUÉ CAMBIA?
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Cambio de paradigma en IA Generativa</span>
+          <h2 class="slide-title">Del MLOps clásico al LLMOps: ¿qué cambia?</h2>
+        </div>
+
+        <table class="data-table anim d2">
+          <thead>
+            <tr><th>Dimensión</th><th>MLOps Clásico</th><th>LLMOps / GenAI (LLMs, RAG y Agentes)</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>Artefacto central</strong></td><td>Pesos entrenados (<em>&theta;</em>)</td><td><strong>Prompts versionados</strong> + contexto RAG + herramientas</td></tr>
+            <tr><td><strong>Comportamiento</strong></td><td>Determinista dado <em>x</em></td><td>Estocástico (<code class="inline">temperature</code>, cambios silenciosos de API)</td></tr>
+            <tr><td><strong>Evaluación</strong></td><td>Etiqueta exacta (F1, RMSE)</td><td><strong>Scorers <code class="inline">@scorer</code> + LLM-as-a-Judge + Triada RAG</strong></td></tr>
+            <tr><td><strong>Economía</strong></td><td>CPU/RAM predecible</td><td><strong>Coste por token (USD/1k req)</strong>, TTFT y ventana</td></tr>
+            <tr><td><strong>Seguridad</strong></td><td>Data/Concept Drift</td><td>Alucinaciones, <strong>Prompt Injection</strong> y fuga de PII</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 39: MLFLOW 3 PROMPT REGISTRY
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Prompts como artefactos versionados</span>
+          <h2 class="slide-title">MLflow 3 Prompt Registry (<code class="inline">mlflow.genai</code>)</h2>
+        </div>
+
+        <!-- Ilustración ciclo de vida de Prompts y Aliases -->
+        <div class="svg-box compact anim d2">
+          <svg viewBox="0 0 1060 116" xmlns="http://www.w3.org/2000/svg">
+            <rect x="26" y="40" width="150" height="54" rx="10" fill="rgba(251,113,133,0.18)" stroke="#fb7185" stroke-width="1.8"/>
+            <text x="101" y="64" fill="#fecdd3" font-size="13.5" font-weight="800" text-anchor="middle">Prompt v1</text>
+            <text x="101" y="82" fill="#fda4af" font-size="11.5" text-anchor="middle">Ingenua · 43.7%</text>
+
+            <rect x="236" y="40" width="150" height="54" rx="10" fill="rgba(251,191,36,0.18)" stroke="#fbbf24" stroke-width="1.8"/>
+            <text x="311" y="64" fill="#fde68a" font-size="13.5" font-weight="800" text-anchor="middle">Prompt v2</text>
+            <text x="311" y="82" fill="#fcd34d" font-size="11.5" text-anchor="middle">+ Política · 62.5%</text>
+
+            <rect class="pulse-node" x="446" y="40" width="175" height="54" rx="10" fill="rgba(52,211,153,0.22)" stroke="#34d399" stroke-width="2.2"/>
+            <text x="533" y="64" fill="#ffffff" font-size="14" font-weight="800" text-anchor="middle">Prompt v3</text>
+            <text x="533" y="82" fill="#6ee7b7" font-size="11.5" text-anchor="middle">Citas + Guardrails · 100%</text>
+
+            <rect x="478" y="6" width="112" height="24" rx="12" fill="#059669"/>
+            <text x="534" y="22" fill="#ffffff" font-size="11.5" font-weight="800" text-anchor="middle" font-family="monospace">@production</text>
+
+            <rect x="740" y="34" width="295" height="66" rx="11" fill="#102840" stroke="#38bdf8" stroke-width="2"/>
+            <text x="887" y="60" fill="#7dd3fc" font-size="13.5" font-weight="800" text-anchor="middle">App Carrefour en Producción</text>
+            <text x="887" y="82" fill="#e2e8f0" font-size="11.5" font-family="monospace" text-anchor="middle">load_prompt("prompts:/...@production")</text>
+
+            <line x1="176" y1="67" x2="236" y2="67" stroke="#94a3b8" stroke-width="2.2" class="flow-dash-slow"/>
+            <line x1="386" y1="67" x2="446" y2="67" stroke="#34d399" stroke-width="2.4" class="flow-dash"/>
+            <path id="prLoad" d="M 621 67 L 740 67" fill="none" stroke="#38bdf8" stroke-width="2.8" class="flow-dash"/>
+            <circle r="4.5" fill="#38bdf8"><animateMotion dur="2.2s" repeatCount="indefinite"><mpath href="#prLoad"/></animateMotion></circle>
+            <path d="M 465 98 Q 390 116 320 98" fill="none" stroke="#fbbf24" stroke-width="1.8" stroke-dasharray="4 3"/>
+            <text x="392" y="114" fill="#fbbf24" font-size="10.5" font-weight="700" text-anchor="middle">Rollback 1 s</text>
+          </svg>
+        </div>
+
+        <div class="code-wrap compact anim d3">
+          <div class="code-head">
+            <span><span class="code-dots"><i></i><i></i><i></i></span>Versionado inmutable estilo Git + Aliases + Carga desacoplada</span>
+            <button class="copy-btn">Copiar</button>
+          </div>
+          <pre><code data-lang="python">import mlflow
+
+# 1. Registrar plantilla inmutable con variables {{...}} y mensaje de commit
+v3 = mlflow.genai.register_prompt(
+    name="carrefour_soporte_cliente",
+    template=(
+        "Responde SOLO con &lt;politica_oficial&gt; y cita [POL-...].\n"
+        "&lt;politica_oficial&gt;{{contexto}}&lt;/politica_oficial&gt;\n"
+        "&lt;consulta_usuario&gt;{{pregunta}}&lt;/consulta_usuario&gt;"
+    ),
+    commit_message="v3: citas obligatorias y blindaje anti-inyección",
+)
+
+# 2. Promocionar alias (rollback en 1 segundo sin redesplegar código!)
+mlflow.genai.set_prompt_alias("carrefour_soporte_cliente", "production", v3.version)
+
+# 3. Cargar dinámicamente en producción
+prompt = mlflow.genai.load_prompt("prompts:/carrefour_soporte_cliente@production")
+texto = prompt.format(contexto=docs_rag, pregunta=consulta)</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 40: OPTIMIZACIÓN AUTOMÁTICA (DSPY, GEPA Y PARETO)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Superando el ensayo-error manual</span>
+          <h2 class="slide-title">Optimización automática de Prompts: DSPy, GEPA y Pareto</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Optimización reflexiva GEPA en MLflow 3</span></div>
+            <pre><code data-lang="python"># Analiza trazas fallidas + feedback de jueces y reescribe
+# automáticamente el prompt hacia mayor calidad
+res = mlflow.genai.optimize_prompts(
+    predict_fn=asistente_carrefour,
+    prompt_uris=["prompts:/carrefour_soporte_cliente/1"],
+    train_data=golden_train,
+    scorers=[hechos_esperados, cita_politica, seguridad],
+    optimizer="gepa",
+)
+
+# También integración nativa con DSPy (MIPROv2):
+mlflow.dspy.autolog()</code></pre>
+          </div>
+
+          <div class="svg-box" style="flex-direction:column;gap:8px;">
+            <span style="font-size:14.5px;font-weight:800;color:var(--primary);">Frontera de Pareto: Calidad vs. Coste / 1.000 consultas</span>
+            <svg viewBox="0 0 470 235" xmlns="http://www.w3.org/2000/svg">
+              <line x1="56" y1="196" x2="445" y2="196" stroke="#94a3b8" stroke-width="2"/>
+              <line x1="56" y1="196" x2="56" y2="18" stroke="#94a3b8" stroke-width="2"/>
+              <text x="250" y="224" fill="#cbd5e1" font-size="13" font-weight="700" text-anchor="middle">Coste por 1.000 consultas (USD) →</text>
+              <text x="19" y="108" fill="#cbd5e1" font-size="13" font-weight="700" transform="rotate(-90 19 108)" text-anchor="middle">Calidad (%)</text>
+
+              <path d="M 96 100 Q 160 48 260 38 T 415 30" fill="none" stroke="#2dd4bf" stroke-width="3" stroke-dasharray="6 4"/>
+              <text x="342" y="22" fill="#2dd4bf" font-size="12" font-weight="800">Frontera de Pareto</text>
+
+              <circle cx="102" cy="152" r="8" fill="#fb7185"/>
+              <text x="116" y="157" fill="#fecdd3" font-size="12.5" font-weight="600">Ligero + v1 manual (58%)</text>
+
+              <circle cx="380" cy="84" r="8" fill="#fbbf24"/>
+              <text x="256" y="105" fill="#fde68a" font-size="12.5" font-weight="600">Grande + v1 manual (84% · caro)</text>
+
+              <circle class="pulse-node" cx="148" cy="54" r="10" fill="#34d399" stroke="#ffffff" stroke-width="2.2"/>
+              <text x="165" y="59" fill="#34d399" font-size="13" font-weight="800">Ligero + GEPA/v3 (92% · 8x menos coste!)</text>
+
+              <circle cx="408" cy="34" r="8" fill="#38bdf8"/>
+              <text x="315" y="52" fill="#bae6fd" font-size="12" font-weight="600">Grande + GEPA (96%)</text>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 41: MLFLOW TRACING (OPENTELEMETRY WATERFALL)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Observabilidad nativa OpenTelemetry</span>
+          <h2 class="slide-title">MLflow Tracing: trazas en cascada de RAG y Agentes</h2>
+        </div>
+
+        <div class="grid-60-40 anim d2">
+          <div class="card">
+            <h3>Waterfall de una consulta RAG (1.240 ms)</h3>
+            <div style="display:flex;flex-direction:column;gap:11px;font-family:var(--font-mono);font-size:13.5px;margin-top:4px;">
+              <div>
+                <div style="display:flex;justify-content:space-between;"><span><span class="badge badge-violet">AGENT</span> asistente_carrefour</span><span>1.240 ms</span></div>
+                <div class="bar-track" style="height:16px;margin-top:4px;"><div class="bar-fill" style="--target-w:100%;background:#c4b5fd;"></div></div>
+              </div>
+              <div style="padding-left:20px;">
+                <div style="display:flex;justify-content:space-between;"><span><span class="badge badge-blue">RETRIEVER</span> pgvector top_k=4</span><span>180 ms</span></div>
+                <div class="bar-track" style="height:14px;margin-top:4px;"><div class="bar-fill" style="--target-w:20%;background:#38bdf8;"></div></div>
+              </div>
+              <div style="padding-left:20px;">
+                <div style="display:flex;justify-content:space-between;"><span><span class="badge badge-amber">TOOL</span> verificar_pedido_erp()</span><span>310 ms</span></div>
+                <div class="bar-track" style="height:14px;margin-top:4px;"><div class="bar-fill" style="--target-w:26%;margin-left:20%;background:#fbbf24;"></div></div>
+              </div>
+              <div style="padding-left:20px;">
+                <div style="display:flex;justify-content:space-between;"><span><span class="badge badge-emerald">LLM</span> gpt-4o-mini (490 tokens)</span><span>750 ms</span></div>
+                <div class="bar-track" style="height:14px;margin-top:4px;"><div class="bar-fill" style="--target-w:54%;margin-left:46%;background:#34d399;"></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Instrumentación en 1 línea</span></div>
+            <pre><code data-lang="python"># Autologging OpenAI / LangChain / Anthropic
+mlflow.openai.autolog()
+mlflow.langchain.autolog()
+
+@mlflow.trace(span_type=SpanType.RETRIEVER)
+def recuperar_contexto(q: str) -&gt; str:
+    return vector_db.search(q, k=4)
+
+@mlflow.trace(span_type=SpanType.AGENT)
+def responder(q: str) -&gt; str:
+    return llamar_llm(recuperar_contexto(q), q)</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 42: EVALUACIÓN GENAI (mlflow.genai.evaluate)
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Evaluación rigurosa de LLMs y RAG</span>
+          <h2 class="slide-title"><code class="inline">mlflow.genai.evaluate()</code>: <code class="inline">@scorer</code> y LLM-as-a-Judge</h2>
+        </div>
+
+        <div class="grid-60-40 anim d2">
+          <div class="code-wrap compact">
+            <div class="code-head"><span><span class="code-dots"><i></i><i></i><i></i></span>Scorers deterministas + Juez trace-aware</span></div>
+            <pre><code data-lang="python">@scorer
+def cita_politica(*, outputs: str, expectations: dict) -&gt; Feedback:
+    ok = expectations["expected_policy"] in (outputs or "")
+    return Feedback(name="cita_politica", value=ok)
+
+juez_erp = make_judge(
+    name="uso_herramienta_erp",
+    instructions="Revisa {{ trace }} y confirma llamada ERP antes de reembolsar.",
+    model="openai:/gpt-4o-mini",
+)
+
+res = mlflow.genai.evaluate(
+    data=golden_dataset,
+    predict_fn=asistente_carrefour,
+    scorers=[cita_politica, Correctness(), Safety(), juez_erp],
+)</code></pre>
+          </div>
+
+          <div class="card accent-violet">
+            <h3>Triada de Evaluación RAG</h3>
+            <ul class="clean violet">
+              <li><strong>Context Relevance:</strong> calidad del recuperador (Recall@k, MRR, NDCG).</li>
+              <li><strong>Faithfulness / Groundedness:</strong> 0 alucinaciones fuera del contexto.</li>
+              <li><strong>Answer Relevance:</strong> responde realmente al cliente.</li>
+            </ul>
+            <p style="font-size:15.5px;color:var(--amber);">Combina siempre scorers deterministas (coste 0) + jueces LLM calibrados frente a humanos.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 43: RESPONSESAGENT, MODELS FROM CODE Y AI GATEWAY
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Servicio y gobernanza empresarial de agentes</span>
+          <h2 class="slide-title"><code class="inline">ResponsesAgent</code>, Models from Code y AI Gateway</h2>
+        </div>
+
+        <div class="grid-3 anim d2">
+          <div class="card accent-blue">
+            <span class="badge badge-blue">Sin cloudpickle</span>
+            <h3>Models from Code</h3>
+            <p>Los clientes HTTP/LLM no se serializan bien con <code class="inline">pickle</code>. <code class="inline">set_model(agent)</code> empaqueta código fuente limpio + YAML.</p>
+          </div>
+
+          <div class="card accent-teal">
+            <span class="badge badge-teal">Interfaz MLflow 3</span>
+            <h3><code class="inline">ResponsesAgent</code></h3>
+            <p>Contrato estándar multi-turno, <em>tool calling</em> y streaming compatible con LangGraph, OpenAI Agents SDK o Python puro.</p>
+          </div>
+
+          <div class="card accent-violet">
+            <span class="badge badge-violet">Proxy Unificado</span>
+            <h3>MLflow AI Gateway</h3>
+            <p>Gobierna OpenAI, Anthropic, Gemini, Bedrock y Ollama/vLLM: claves centralizadas, <em>fallbacks</em>, guardrails PII y presupuestos.</p>
+          </div>
+        </div>
+
+        <div class="card accent-emerald anim d3">
+          <p><strong>Data Flywheel continuo:</strong> los <strong>Scheduled Scorers</strong> evalúan un 10–20 % de las trazas reales en producción sin añadir latencia al usuario y realimentan el Golden Dataset.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 44: LIVE DEMO 4 — PROMPT EVAL SOPORTE CARREFOUR
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Laboratorio en directo · LLMOps con MLflow 3</span>
+          <h2 class="slide-title">LIVE DEMO 4: Prompt Registry y Evaluación (Soporte Carrefour)</h2>
+        </div>
+
+        <div class="demo-banner anim d2">
+          <span class="badge badge-violet">ejercicios-clase/04_mlflow_carrefour_prompt_eval/ · OpenAI · Ollama · --offline</span>
+          <div class="grid-60-40">
+            <div class="code-wrap compact">
+              <div class="code-head">
+                <span><span class="code-dots"><i></i><i></i><i></i></span>Registrar v1/v2/v3 → Evaluar 8 casos → Promocionar @production</span>
+                <button class="copy-btn">Copiar</button>
+              </div>
+              <pre><code data-lang="bash">cd ejercicios-clase/04_mlflow_carrefour_prompt_eval
+uv venv .venv &amp;&amp; source .venv/bin/activate
+uv pip install -r requirements.txt
+
+python solucion/01_prompt_registry.py
+python solucion/02_prompt_eval_y_tracing.py --offline
+mlflow ui --backend-store-uri sqlite:///mlflow_genai_carrefour.db --port 5002</code></pre>
+            </div>
+
+            <div class="card">
+              <h3>Resultados reales (incluye 2 prompt injections)</h3>
+              <div class="bar-row" style="grid-template-columns:105px 1fr 78px;margin-bottom:10px;">
+                <span style="font-family:var(--font-mono);font-size:14px;color:var(--rose);font-weight:700;">v1 Ingenua</span>
+                <div class="bar-track" style="height:22px;"><div class="bar-fill" style="--target-w:43.75%;background:#fb7185;"></div></div>
+                <span style="font-family:var(--font-mono);font-size:14px;font-weight:800;color:var(--rose);">43.75%</span>
+              </div>
+              <div class="bar-row" style="grid-template-columns:105px 1fr 78px;margin-bottom:10px;">
+                <span style="font-family:var(--font-mono);font-size:14px;color:var(--amber);font-weight:700;">v2 Política</span>
+                <div class="bar-track" style="height:22px;"><div class="bar-fill" style="--target-w:62.5%;background:#fbbf24;"></div></div>
+                <span style="font-family:var(--font-mono);font-size:14px;font-weight:800;color:var(--amber);">62.50%</span>
+              </div>
+              <div class="bar-row" style="grid-template-columns:105px 1fr 78px;margin-bottom:4px;">
+                <span style="font-family:var(--font-mono);font-size:14px;color:var(--emerald);font-weight:700;">v3 Blindada</span>
+                <div class="bar-track" style="height:22px;"><div class="bar-fill" style="--target-w:100%;background:linear-gradient(90deg,#14b8a6,#34d399);"></div></div>
+                <span style="font-family:var(--font-mono);font-size:14px;font-weight:800;color:var(--emerald);">100.0%</span>
+              </div>
+              <p style="font-size:14.5px;color:var(--emerald);margin-top:4px;">Quality Gate superado → <code class="inline">@production</code> = v3.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 45: UNIENDO TODO — AIRFLOW 3 + MLFLOW 3 END-TO-END
+    ================================================================== -->
+    <section class="slide">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Cerrando el círculo en producción</span>
+          <h2 class="slide-title">Integrando Apache Airflow 3 + MLflow 3</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-blue">
+            <span class="badge badge-blue">Arquitectura 1 · MLOps Tabular</span>
+            <h3>Reentrenamiento guiado por Drift</h3>
+            <ul class="clean">
+              <li>PostgreSQL → <code class="inline">ObjectStoragePath</code> S3 → validación Pandera.</li>
+              <li><code class="inline">@task.branch</code> calcula PSI: si no hay drift, omite reentreno.</li>
+              <li><code class="inline">KubernetesPodOperator</code> entrena y registra en MLflow.</li>
+              <li>Compara en <strong>holdout</strong> vs. <code class="inline">@champion</code> y promociona alias + Slack.</li>
+            </ul>
+          </div>
+
+          <div class="card accent-teal">
+            <span class="badge badge-teal">Arquitectura 2 · LLMOps / RAG</span>
+            <h3>Evaluación reactiva con Airflow 3 Assets</h3>
+            <ul class="clean teal">
+              <li><strong>DAG 1 (Ingesta RAG):</strong> actualiza documentos → embeddings en <code class="inline">pgvector</code> → emite <code class="inline">Asset("s3://kb/corpus")</code>.</li>
+              <li><strong>DAG 2 (Eval GenAI):</strong> disparado por el <code class="inline">Asset</code> o por un nuevo prompt <code class="inline">@staging</code>.</li>
+              <li>Lanza <code class="inline">mlflow.genai.evaluate()</code> y promociona <code class="inline">@production</code> o alerta con enlace a las trazas fallidas.</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Ilustración End-to-End Airflow 3 + MLflow 3 -->
+        <div class="svg-box compact anim d3">
+          <svg viewBox="0 0 1080 120" xmlns="http://www.w3.org/2000/svg">
+            <path id="e2eFlow" d="M 165 60 L 925 60" fill="none" stroke="none"/>
+            <rect x="20" y="26" width="150" height="68" rx="10" fill="rgba(251,191,36,0.18)" stroke="#fbbf24" stroke-width="2"/>
+            <text x="95" y="54" fill="#fde68a" font-size="13" font-weight="800" text-anchor="middle">Datos / Docs</text>
+            <text x="95" y="75" fill="#e2e8f0" font-size="11.5" text-anchor="middle">Postgres · S3 · KB</text>
+
+            <rect class="pulse-node" x="228" y="26" width="195" height="68" rx="10" fill="rgba(56,189,248,0.20)" stroke="#38bdf8" stroke-width="2.2"/>
+            <text x="325" y="54" fill="#7dd3fc" font-size="13.5" font-weight="800" text-anchor="middle">Apache Airflow 3</text>
+            <text x="325" y="75" fill="#e2e8f0" font-size="11.5" text-anchor="middle">Medallion · Drift · Assets</text>
+
+            <rect class="pulse-node" x="480" y="26" width="215" height="68" rx="10" fill="rgba(196,181,253,0.20)" stroke="#c4b5fd" stroke-width="2.2"/>
+            <text x="587" y="54" fill="#ede9fe" font-size="13.5" font-weight="800" text-anchor="middle">MLflow 3 Platform</text>
+            <text x="587" y="75" fill="#e2e8f0" font-size="11.5" text-anchor="middle">Tracking · Prompts · Eval</text>
+
+            <rect x="752" y="26" width="155" height="68" rx="10" fill="rgba(52,211,153,0.22)" stroke="#34d399" stroke-width="2.2"/>
+            <text x="829" y="54" fill="#6ee7b7" font-size="13.5" font-weight="800" text-anchor="middle">Producción</text>
+            <text x="829" y="75" fill="#d1fae5" font-size="11.5" text-anchor="middle">@champion / @prod</text>
+
+            <rect x="945" y="26" width="118" height="68" rx="10" fill="rgba(45,212,191,0.18)" stroke="#2dd4bf" stroke-width="1.8"/>
+            <text x="1004" y="54" fill="#5eead4" font-size="12.5" font-weight="800" text-anchor="middle">Monitor</text>
+            <text x="1004" y="75" fill="#e2e8f0" font-size="11" text-anchor="middle">Traces + Slack</text>
+
+            <line x1="170" y1="60" x2="228" y2="60" stroke="#38bdf8" stroke-width="2.6" class="flow-dash"/>
+            <line x1="423" y1="60" x2="480" y2="60" stroke="#c4b5fd" stroke-width="2.6" class="flow-dash"/>
+            <line x1="695" y1="60" x2="752" y2="60" stroke="#34d399" stroke-width="2.6" class="flow-dash"/>
+            <line x1="907" y1="60" x2="945" y2="60" stroke="#2dd4bf" stroke-width="2.6" class="flow-dash"/>
+            <circle r="5" fill="#38bdf8"><animateMotion dur="4.2s" repeatCount="indefinite"><mpath href="#e2eFlow"/></animateMotion></circle>
+            <circle r="5" fill="#34d399"><animateMotion dur="4.2s" begin="2.1s" repeatCount="indefinite"><mpath href="#e2eFlow"/></animateMotion></circle>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         SLIDE 46: 10 REGLAS DE ORO Y CIERRE
+    ================================================================== -->
+    <section class="slide hero">
+      <div class="slide-inner">
+        <div class="slide-header anim d1">
+          <span class="kicker">Resumen ejecutivo · Preguntas</span>
+          <h2 class="slide-title">10 Reglas de Oro para llevarse a producción</h2>
+        </div>
+
+        <div class="grid-2 anim d2">
+          <div class="card accent-blue">
+            <h3>Apache Airflow 3 y Conectores</h3>
+            <ol class="clean">
+              <li><strong>Airflow orquesta, no procesa:</strong> solo URIs en XCom.</li>
+              <li><strong>Idempotencia siempre:</strong> particiona por <code class="inline">{{ ds }}</code>.</li>
+              <li><strong>Cero secretos en código:</strong> Secrets Backends e IAM Roles.</li>
+              <li><strong>Espera eficiente:</strong> <code class="inline">deferrable=True</code> con Triggerer.</li>
+              <li><strong>Piensa en Airflow 3:</strong> <code class="inline">airflow.sdk</code>, Versioning y <code class="inline">Asset</code>.</li>
+            </ol>
+          </div>
+
+          <div class="card accent-teal">
+            <h3>MLflow 3, MLOps y LLMOps</h3>
+            <ol start="6" class="clean">
+              <li><strong>El código ML es el 5%:</strong> invierte en datos, Feature Store y Drift.</li>
+              <li><strong>Tracking limpio:</strong> <code class="inline">log_metrics</code>, firmas y evaluación <em>holdout</em>.</li>
+              <li><strong>Usa Aliases (<code class="inline">@champion</code>):</strong> los <em>Stages</em> están deprecados.</li>
+              <li><strong>Prompting científico:</strong> Prompt Registry + Tracing + <code class="inline">genai.evaluate</code>.</li>
+              <li><strong>Gobernanza GenAI:</strong> <code class="inline">ResponsesAgent</code>, AI Gateway y <em>Data Flywheel</em>.</li>
+            </ol>
+          </div>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;" class="anim d3">
+          <span style="color:var(--text-muted);font-size:16px;">Manual Técnico PDF (197 págs.) · 4 Laboratorios Carrefour (<code class="inline">ejercicios-clase/</code>)</span>
+          <span class="badge badge-emerald" style="font-size:14px;padding:7px 16px;">¡Gracias! ¿Preguntas?</span>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Controles mínimos y limpios -->
+  <footer class="controls">
+    <div class="ctrl-group">
+      <button class="ctrl-btn" id="btnPrev" title="Anterior (←)">←</button>
+      <span class="slide-counter" id="slideCounter">1 / 46</span>
+      <button class="ctrl-btn" id="btnNext" title="Siguiente (→ / Espacio)">→</button>
+    </div>
+    <div class="ctrl-group">
+      <button class="ctrl-btn" id="btnTheme" title="Tema oscuro/claro para proyector (T)">Tema (T)</button>
+      <button class="ctrl-btn" id="btnFullscreen" title="Pantalla completa (F)">Pantalla completa (F)</button>
+    </div>
+  </footer>
+
+  <script>
+/* ============================================================================
+   presentacion-clase/app.js
+   Motor minimalista y lineal: navegación, syntax highlighting offline,
+   botón Copiar, tema claro/oscuro (T) y pantalla completa (F).
+   ============================================================================ */
+
+(function () {
+  "use strict";
+
+  const slides = Array.from(document.querySelectorAll(".slide"));
+  const totalSlides = slides.length;
+  let currentIndex = 0;
+
+  const progressFill = document.getElementById("progressFill");
+  const slideCounter = document.getElementById("slideCounter");
+
+  function clamp(n, min, max) {
+    return Math.max(min, Math.min(max, n));
+  }
+
+  function goToSlide(idx, updateHash = true) {
+    idx = clamp(idx, 0, totalSlides - 1);
+    currentIndex = idx;
+
+    slides.forEach((s, i) => {
+      s.classList.remove("active", "prev");
+      if (i === idx) s.classList.add("active");
+      else if (i < idx) s.classList.add("prev");
+    });
+
+    const pct = totalSlides > 1 ? (idx / (totalSlides - 1)) * 100 : 100;
+    if (progressFill) progressFill.style.width = pct.toFixed(2) + "%";
+    if (slideCounter) slideCounter.textContent = `${idx + 1} / ${totalSlides}`;
+    if (updateHash) history.replaceState(null, "", `#slide-${idx + 1}`);
+  }
+
+  function nextSlide() { goToSlide(currentIndex + 1); }
+  function prevSlide() { goToSlide(currentIndex - 1); }
+
+  /* -------------------- SYNTAX HIGHLIGHTER OFFLINE -------------------- */
+  function escapeHtml(str) {
+    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  const LANG_RULES = {
+    python: [
+      { cls: "tok-com", re: /#[^\n]*/y },
+      { cls: "tok-str", re: /(?:[frbuFRBU]{0,2})(?:"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')/y },
+      { cls: "tok-dec", re: /@[A-Za-z_][A-Za-z0-9_.]*/y },
+      { cls: "tok-kw", re: /\b(?:from|import|as|def|class|return|with|if|elif|else|for|in|while|try|except|raise|pass|yield|async|await|and|or|not|is|None|True|False|lambda)\b/y },
+      { cls: "tok-cls", re: /\b(?:DAG|Asset|Dataset|PostgresHook|S3Hook|HttpHook|BaseHook|BaseOperator|BaseTrigger|SQLExecuteQueryOperator|SQLColumnCheckOperator|KubernetesPodOperator|ObjectStoragePath|S3KeySensor|DbtTaskGroup|DatabricksRunNowOperator|AwaitMessageTriggerFunctionSensor|RandomForestClassifier|MlflowClient|Feedback|Guidelines|Correctness|Safety|ResponsesAgent|SpanType|TriggerEvent|TriggerRule|PythonOperator)\b/y },
+      { cls: "tok-num", re: /\b\d+(?:\.\d+)?\b/y },
+      { cls: "tok-fn", re: /\b[a-zA-Z_][a-zA-Z0-9_]*(?=\s*\()/y },
+    ],
+    sql: [
+      { cls: "tok-com", re: /--[^\n]*/y },
+      { cls: "tok-str", re: /'(?:''|[^'])*'/y },
+      { cls: "tok-kw", re: /\b(?:SELECT|FROM|WHERE|JOIN|ON|GROUP|BY|ORDER|DESC|INSERT|INTO|VALUES|DELETE|UPDATE|SET|CONFLICT|DO|EXCLUDED|AS|AND|OR|CASE|END|ROUND|COUNT|SUM|AVG|MAX|MIN)\b/iy },
+      { cls: "tok-num", re: /\b\d+(?:\.\d+)?\b/y },
+    ],
+    bash: [
+      { cls: "tok-com", re: /#[^\n]*/y },
+      { cls: "tok-str", re: /"(?:\\.|[^"\\])*"|'[^']*'/y },
+      { cls: "tok-kw", re: /\b(?:docker|compose|airflow|mlflow|uv|pip|python|python3|curl|export|source|cd|cp|psql|ruff|pytest)\b/y },
+      { cls: "tok-dec", re: /--[a-zA-Z0-9_-]+|\B-[a-zA-Z]\b/y },
+      { cls: "tok-num", re: /\b\d+(?:\.\d+)?\b/y },
+    ],
+  };
+
+  function highlightCode(rawText, lang) {
+    const rules = LANG_RULES[lang] || LANG_RULES.python;
+    let out = "";
+    let i = 0;
+    while (i < rawText.length) {
+      let matched = false;
+      for (const rule of rules) {
+        rule.re.lastIndex = i;
+        const m = rule.re.exec(rawText);
+        if (m && m.index === i) {
+          out += `<span class="${rule.cls}">${escapeHtml(m[0])}</span>`;
+          i += m[0].length;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) {
+        out += escapeHtml(rawText[i]);
+        i++;
+      }
+    }
+    return out;
+  }
+
+  function initCodeBlocks() {
+    document.querySelectorAll("pre code[data-lang]").forEach((codeEl) => {
+      const lang = codeEl.dataset.lang || "python";
+      const raw = codeEl.textContent.replace(/^\n/, "").replace(/\s+$/, "");
+      codeEl.dataset.raw = raw;
+      codeEl.innerHTML = highlightCode(raw, lang);
+    });
+
+    document.querySelectorAll(".copy-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const codeEl = btn.closest(".code-wrap")?.querySelector("code");
+        const text = codeEl ? (codeEl.dataset.raw || codeEl.textContent) : "";
+        if (navigator.clipboard && text) {
+          navigator.clipboard.writeText(text).then(() => {
+            const orig = btn.textContent;
+            btn.textContent = "Copiado";
+            setTimeout(() => (btn.textContent = orig), 1400);
+          });
+        }
+      });
+    });
+  }
+
+  /* -------------------- CONTROLES Y TECLADO -------------------- */
+  document.getElementById("btnPrev")?.addEventListener("click", prevSlide);
+  document.getElementById("btnNext")?.addEventListener("click", nextSlide);
+  document.getElementById("btnTheme")?.addEventListener("click", () => document.body.classList.toggle("theme-light"));
+  document.getElementById("btnFullscreen")?.addEventListener("click", () => {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+    else document.exitFullscreen?.();
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.target && ["INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
+    switch (e.key) {
+      case "ArrowRight":
+      case "PageDown":
+      case " ":
+        e.preventDefault();
+        nextSlide();
+        break;
+      case "ArrowLeft":
+      case "PageUp":
+        e.preventDefault();
+        prevSlide();
+        break;
+      case "Home": goToSlide(0); break;
+      case "End": goToSlide(totalSlides - 1); break;
+      case "t": case "T": document.body.classList.toggle("theme-light"); break;
+      case "f": case "F":
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+        else document.exitFullscreen?.();
+        break;
+    }
+  });
+
+  let touchStartX = 0;
+  document.addEventListener("touchstart", (e) => (touchStartX = e.changedTouches[0].screenX), { passive: true });
+  document.addEventListener("touchend", (e) => {
+    const dx = e.changedTouches[0].screenX - touchStartX;
+    if (Math.abs(dx) > 55) dx < 0 ? nextSlide() : prevSlide();
+  }, { passive: true });
+
+  initCodeBlocks();
+  const match = location.hash.match(/^#slide-(\d+)$/);
+  goToSlide(match ? clamp(parseInt(match[1], 10) - 1, 0, totalSlides - 1) : 0, false);
+})();
+
+  </script>
+</body>
+</html>

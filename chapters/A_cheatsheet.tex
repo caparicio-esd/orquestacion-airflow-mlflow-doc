@@ -1,0 +1,319 @@
+% ============================================================================
+% A_cheatsheet.tex — Apéndice A: Guía de Referencia Rápida (Cheat Sheet)
+% ============================================================================
+
+\chapter[Guía de Referencia Rápida (Cheat Sheet)]{Guía de Referencia Rápida (Cheat Sheet)}\label{app:cheatsheet}
+
+Este apéndice condensa los comandos CLI, plantillas Jinja, esquemas de URI y variables de entorno de consulta diaria en Apache Airflow~(2.10/3.0+) y MLflow~(2.x/3.x). Las novedades recientes se destacan con \badge[TealAccent]{AF 3} y \badge[PrimaryAccent]{MLflow 3}.
+
+% ============================================================================
+\section{Comandos CLI esenciales de Apache Airflow}\label{sec:cheat-airflow-cli}
+% ============================================================================
+
+\begin{table}[htbp]
+\centering
+\caption{Comandos CLI fundamentales de Apache Airflow (2.10 y 3.0+).}
+\label{tab:cheat-airflow-cli}
+\scriptsize
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}L{1.6cm} L{6.8cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Grupo} &
+\textcolor{white}{\sffamily\bfseries Comando} &
+\textcolor{white}{\sffamily\bfseries Propósito y notas clave} \\
+\midrule
+Arranque y BD &
+\code{airflow standalone} &
+Levanta entorno local completo (BD, API/UI, scheduler, triggerer) con usuario inicial. \\
+\rowcolor{TableStripe}
+ &
+\code{airflow db migrate} / \code{airflow db check} &
+Aplica migraciones de esquema (antes \code{db upgrade}) y verifica salud de la BD de metadatos. \\
+ &
+\code{airflow api-server -p 8080} \badge[TealAccent]{AF 3} &
+Arranca el nuevo API Server (UI + REST API v2 + Task Execution API; antes \code{webserver}). \\
+\midrule
+\rowcolor{TableStripe}
+DAGs &
+\code{airflow dags list} / \code{reserialize} &
+Lista los DAGs parseados y fuerza su reparseo y serialización hacia la base de metadatos. \\
+ &
+\code{airflow dags trigger <id> --conf '\{\textquotedbl{}k\textquotedbl{}:\textquotedbl{}v\textquotedbl{}\}' } &
+Dispara un \textit{DagRun} manual pasando parámetros JSON accesibles en \code{dag\_run.conf}. \\
+\rowcolor{TableStripe}
+ &
+\code{airflow dags pause / unpause <id>} &
+Detiene o reactiva la planificación automática de un DAG sin alterar su historial. \\
+ &
+\code{airflow dags test <id> 2026-11-20} &
+Ejecuta localmente un DAG completo en un único proceso para depuración rápida. \\
+\midrule
+\rowcolor{TableStripe}
+Tareas &
+\code{airflow tasks list <id> --tree} &
+Muestra la estructura de dependencias del DAG en formato árbol. \\
+ &
+\code{airflow tasks test <id> <task> 2026-11-20} &
+Ejecuta una sola tarea aislada sin comprobar dependencias ni persistir estado. \\
+\rowcolor{TableStripe}
+ &
+\code{airflow tasks clear <id> -t <re> -s <ini> -e <fin>} &
+Limpia instancias de tareas en un rango de fechas para reejecución idempotente. \\
+\midrule
+Backfills &
+\code{airflow backfill create --dag-id <id> --from-date <d1> --to-date <d2>} \badge[TealAccent]{AF 3} &
+Crea un \textit{backfill} gestionado por el Scheduler con seguimiento en UI (2.x: \code{dags backfill}). \\
+\midrule
+\rowcolor{TableStripe}
+Conn. y Vars &
+\code{airflow connections add '<cid>' --conn-uri '<uri>'} &
+Registra una conexión cifrada por URI (\code{list -o table} y \code{export} para inspección/migración). \\
+ &
+\code{airflow variables set <k> <v>} / \code{import f.json} &
+Gestiona Variables en metadatos (\code{--json} para diccionarios y carga masiva en CI/CD). \\
+\midrule
+\rowcolor{TableStripe}
+Providers &
+\code{airflow providers list} / \code{hooks} &
+Enumera paquetes \pkg{apache-airflow-providers-*} instalados y \textit{Hooks}/\code{conn\_type} activos. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================================
+\section{Comandos CLI esenciales de MLflow}\label{sec:cheat-mlflow-cli}
+% ============================================================================
+
+\begin{table}[htbp]
+\centering
+\caption{Comandos CLI fundamentales de MLflow (2.x y 3.x).}
+\label{tab:cheat-mlflow-cli}
+\scriptsize
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}L{1.8cm} L{7.0cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Grupo} &
+\textcolor{white}{\sffamily\bfseries Comando} &
+\textcolor{white}{\sffamily\bfseries Propósito y notas clave} \\
+\midrule
+UI y Servidor &
+\code{mlflow ui --host 0.0.0.0 --port 5000} &
+Arranca interfaz web local sobre el almacén de seguimiento por defecto (\code{./mlruns}). \\
+\rowcolor{TableStripe}
+ &
+\code{mlflow server --backend-store-uri postgresql+psycopg2://... --artifacts-destination s3://bkt --serve-artifacts} &
+Servidor remoto de producción: metadatos en PostgreSQL y \textit{proxy} autenticado de artefactos hacia S3/MinIO. \\
+\midrule
+Tracking y GC &
+\code{mlflow experiments create -n <nombre>} &
+Crea un experimento lógico; \code{mlflow runs list --experiment-id <id>} lista corridas. \\
+\rowcolor{TableStripe}
+ &
+\code{mlflow gc --older-than 30d} &
+Elimina definitivamente metadatos y artefactos de \textit{runs} marcados como borrados. \\
+\midrule
+Serving y OCI &
+\code{mlflow models serve -m \textquotedbl{}models:/clf@champion\textquotedbl{} -p 5001 --no-conda} &
+Sirve un modelo registrado como API REST (\code{/invocations}, \code{/health}) vía alias. \\
+\rowcolor{TableStripe}
+ &
+\code{mlflow models predict -m \textquotedbl{}runs:/<id>/model\textquotedbl{} -i in.json} &
+Ejecuta inferencia \textit{batch} rápida desde terminal contra ficheros JSON o CSV. \\
+ &
+\code{mlflow models build-docker -m \textquotedbl{}models:/clf@champion\textquotedbl{} -n \textquotedbl{}clf:v4\textquotedbl{}} &
+Construye una imagen OCI autocontenida con modelo, dependencias y servidor web. \\
+\midrule
+\rowcolor{TableStripe}
+Gateway / Run &
+\code{mlflow deployments start-server --config-path gw.yaml} \badge[PrimaryAccent]{MLflow 3} &
+Arranca el servidor del \textit{AI Gateway} (\code{mlflow gateway start}) centralizando claves y cuotas LLM. \\
+ &
+\code{mlflow run https://github.com/org/repo -P lr=0.01} &
+Descarga y ejecuta un MLflow Project reproducible inyectando parámetros desde CLI. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================================
+\section{Macros y variables Jinja esenciales en Airflow}\label{sec:cheat-jinja}
+% ============================================================================
+
+\begin{table}[htbp]
+\centering
+\caption{Variables de contexto y macros Jinja más utilizadas en campos \code{template\_fields}.}
+\label{tab:cheat-jinja}
+\scriptsize
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}L{5.5cm} L{2.7cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Expresión Jinja} &
+\textcolor{white}{\sffamily\bfseries Ejemplo / Tipo} &
+\textcolor{white}{\sffamily\bfseries Semántica y uso recomendado} \\
+\midrule
+\code{\{\{ ds \}\}} / \code{\{\{ ds\_nodash \}\}} &
+\code{2026-11-20} &
+Fecha lógica ISO (\code{YYYY-MM-DD}) y forma compacta sin guiones para particionado. \\
+\rowcolor{TableStripe}
+\code{\{\{ ts \}\}} / \code{\{\{ logical\_date \}\}} &
+ISO~8601 / \code{DateTime} &
+Marca temporal UTC completa y objeto fecha-hora del inicio del intervalo lógico. \\
+\code{\{\{ data\_interval\_start \}\}} / \code{\_end} &
+Objeto \code{DateTime} &
+Límites inferior (inclusivo) y superior (exclusivo) de la ventana procesada. \\
+\rowcolor{TableStripe}
+\code{\{\{ prev\_data\_interval\_start\_success \}\}} &
+Objeto \code{DateTime} &
+Inicio del último intervalo completado con éxito; clave en \textit{watermarks} incrementales. \\
+\code{\{\{ macros.ds\_add(ds, -7) \}\}} &
+\code{2026-11-13} &
+Desplaza \code{ds} un entero de días para ventanas móviles y agregaciones históricas. \\
+\rowcolor{TableStripe}
+\code{\{\{ macros.ds\_format(ds,\textquotedbl{}\%Y-\%m-\%d\textquotedbl{},\textquotedbl{}\%Y/\%m\textquotedbl{}) \}\}} &
+\code{2026/11} &
+Reformatea fechas lógicas a rutas jerárquicas tipo Hive/S3 (\code{year/month}). \\
+\code{\{\{ params.clave \}\}} &
+Valor tipado &
+Accede a un parámetro de \code{params=\{...\}} sobrescribible al disparar el DAG. \\
+\rowcolor{TableStripe}
+\code{\{\{ var.value.k \}\}} / \code{\{\{ var.json.k.sub \}\}} &
+\code{str} / JSON &
+Lee una Airflow Variable en tiempo de ejecución de tarea (nunca al parsear el DAG). \\
+\code{\{\{ conn.warehouse\_pg.host \}\}} &
+\code{str} &
+Resuelve atributos de una \textit{Connection} directamente desde plantilla Jinja. \\
+\rowcolor{TableStripe}
+\code{\{\{ ti.xcom\_pull(task\_ids='t1') \}\}} &
+Valor XCom &
+Inyecta referencias devueltas por una tarea previa (\code{run\_id}, URI S3) en argumentos CLI. \\
+\code{\{\{ dag\_run.run\_id \}\}} &
+\code{scheduled\_\_2026-...} &
+Identificador único del \textit{DagRun}; ideal para etiquetas de trazabilidad en MLflow. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================================
+\section{Esquemas de URIs en Airflow Connections y MLflow}\label{sec:cheat-uris}
+% ============================================================================
+
+\begin{table}[htbp]
+\centering
+\caption{Esquemas de URI estándar para Airflow Connections y recursos de MLflow 3.}
+\label{tab:cheat-uris}
+\scriptsize
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}L{2.5cm} L{6.9cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Sistema / Recurso} &
+\textcolor{white}{\sffamily\bfseries Formato de URI} &
+\textcolor{white}{\sffamily\bfseries Observaciones} \\
+\midrule
+Airflow: PostgreSQL &
+\code{postgresql://usr:pwd@host:5432/db?sslmode=require} &
+Parámetros de query pasan al campo \code{extra} del Hook. \\
+\rowcolor{TableStripe}
+Airflow: S3 / MinIO &
+\code{aws://key:sec@/?\allowbreak endpoint\_url=http\%3A\%2F\%2Fminio\%3A9000} &
+URL-encoding obligatorio en \code{endpoint\_url}. \\
+Airflow: HTTP / REST &
+\code{https://usr:token@api.ejemplo.com:443/v1} &
+Consumido por \code{HttpHook} o cliente MLflow. \\
+\rowcolor{TableStripe}
+Airflow: Slack &
+\code{https://hooks.slack.com/services/T00/B00/XXXX} &
+Tipo \code{slackwebhook}; ruta secreta en \code{password}. \\
+Airflow: Storage &
+\code{s3://ml-data-lake/scoring/dt=2026-11-20/data.parquet} &
+Usado por \code{ObjectStoragePath(..., conn\_id=\textquotedbl{}minio\_s3\textquotedbl{})}. \\
+\midrule
+\rowcolor{TableStripe}
+MLflow: Run &
+\code{runs:/<run\_id>/model} &
+Referencia inmutable a un artefacto de un \textit{run}. \\
+MLflow: Modelo &
+\code{models:/scoring\_clf@champion} \badge[PrimaryAccent]{MLflow 3} &
+Alias recomendado; sustituye a \code{/Production}. \\
+\rowcolor{TableStripe}
+MLflow: Versión &
+\code{models:/scoring\_clf/12} &
+Fija explícitamente la versión entera inmutable \code{12}. \\
+MLflow: Prompt &
+\code{prompts:/asistente\_rag@production} \badge[PrimaryAccent]{MLflow 3} &
+Carga plantilla aprobada del \textit{Prompt Registry} (o \code{/7}). \\
+\rowcolor{TableStripe}
+MLflow: Proxy &
+\code{mlflow-artifacts:/<exp>/<run>/artifacts/...} &
+Esquema usado cuando corre \code{--serve-artifacts}. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================================
+\section{Variables de entorno críticas de configuración}\label{sec:cheat-env}
+% ============================================================================
+
+Toda clave de \code{airflow.cfg} sigue el patrón \code{AIRFLOW\_\_<SECCION>\_\_<CLAVE>} (doble guion bajo) con precedencia sobre el fichero de configuración.
+
+\begin{table}[htbp]
+\centering
+\caption{Variables de entorno críticas en Apache Airflow y MLflow.}
+\label{tab:cheat-env}
+\scriptsize
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{@{}L{5.9cm} L{1.6cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Variable de entorno} &
+\textcolor{white}{\sffamily\bfseries Plataforma} &
+\textcolor{white}{\sffamily\bfseries Función crítica} \\
+\midrule
+\code{AIRFLOW\_HOME} &
+Airflow &
+Directorio raíz local (\code{dags/}, \code{logs/}, \code{airflow.cfg}). \\
+\rowcolor{TableStripe}
+\code{AIRFLOW\_\_CORE\_\_EXECUTOR} &
+Airflow &
+Ejecutor (\code{LocalExecutor}, \code{CeleryExecutor}, \code{KubernetesExecutor}). \\
+\code{AIRFLOW\_\_CORE\_\_FERNET\_KEY} &
+Airflow &
+Clave simétrica Base64 de 32~bytes para cifrar \textit{Connections} y \textit{Variables}. \\
+\rowcolor{TableStripe}
+\code{AIRFLOW\_\_DATABASE\_\_SQL\_ALCHEMY\_CONN} &
+Airflow &
+Cadena SQLAlchemy de la BD de metadatos (PostgreSQL en producción). \\
+\code{AIRFLOW\_\_SECRETS\_\_BACKEND} &
+Airflow &
+Gestor externo de secretos (\code{VaultBackend}, \code{SecretsManagerBackend}). \\
+\rowcolor{TableStripe}
+\code{AIRFLOW\_\_API\_\_BASE\_URL} \badge[TealAccent]{AF 3} &
+Airflow 3 &
+URL del API Server usada por el Task Execution API de los \textit{workers}. \\
+\code{AIRFLOW\_CONN\_<CONN\_ID>} / \code{AIRFLOW\_VAR\_<K>} &
+Airflow &
+Inyectan conexiones (URI) y variables en memoria sin persistir en BD. \\
+\midrule
+\rowcolor{TableStripe}
+\code{MLFLOW\_TRACKING\_URI} / \code{\_TOKEN} &
+MLflow &
+Dirección del servidor MLflow y token Bearer OAuth/JWT de autenticación. \\
+\code{MLFLOW\_REGISTRY\_URI} / \code{\_EXPERIMENT\_NAME} &
+MLflow &
+URI dedicada del Registry y experimento por defecto de \textit{runs} y trazas. \\
+\rowcolor{TableStripe}
+\code{MLFLOW\_S3\_ENDPOINT\_URL} &
+MLflow &
+Endpoint S3 personalizado para almacenes compatibles (MinIO, Ceph RGW). \\
+\code{MLFLOW\_ENABLE\_SYSTEM\_METRICS\_LOGGING} &
+MLflow &
+Activada (\code{true}), registra automáticamente CPU, RAM, disco y GPU. \\
+\rowcolor{TableStripe}
+\code{MLFLOW\_GATEWAY\_URI} \badge[PrimaryAccent]{MLflow 3} &
+MLflow 3 &
+URL del servidor \textit{AI Gateway} para rutas LLM y de \textit{embeddings}. \\
+\bottomrule
+\end{tabularx}
+\end{table}

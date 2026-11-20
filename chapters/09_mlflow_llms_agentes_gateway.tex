@@ -1,0 +1,1031 @@
+% ============================================================================
+% 09_mlflow_llms_agentes_gateway.tex — Capítulo 9: Observabilidad, Evaluación
+% de LLMs/RAG, Agentes y AI Gateway con MLflow 3
+% ============================================================================
+
+\chapter[Observabilidad, Evaluación RAG, Agentes y AI Gateway]{Observabilidad, Evaluación de LLMs/RAG, Agentes y AI Gateway con MLflow 3}\label{chap:mlflow-llms}
+
+En el Capítulo~\ref{chap:mlflow-prompting} hemos disciplinado el arte del \textit{prompt engineering} transformándolo en experimentación científica, versionado inmutable y optimización automática. Sin embargo, los sistemas de Inteligencia Artificial Generativa que resuelven problemas de negocio reales rara vez se reducen a una llamada aislada a un modelo de lenguaje. Una aplicación productiva moderna combina \textbf{recuperación aumentada (RAG)} sobre bases vectoriales y motores léxicos, \textit{rerankers} neuronales, múltiples rondas de razonamiento con invocación de herramientas externas (APIs REST, bases de datos SQL, microservicios internos), enrutamiento entre distintos proveedores LLM y bucles continuos de retroalimentación humana.
+
+Operar esta arquitectura compuesta exige resolver cinco problemas de ingeniería que superan ampliamente el alcance de \pkg{MLflow Tracking} clásico: (i) \textbf{observabilidad estructurada} de grafos de ejecución multi-paso mediante trazas distribuidas; (ii) \textbf{evaluación semántica rigurosa} de respuestas abiertas, cadenas RAG y decisiones de agentes; (iii) \textbf{empaquetado y despliegue sin fragilidad de serialización} (\code{pickle}) bajo un contrato unificado de agente; (iv) \textbf{gobernanza centralizada del acceso multi-proveedor} para seguridad, resiliencia y control de costes; y (v) \textbf{monitorización asíncrona en producción} que alimente un volante de mejora continua (\textit{Data Flywheel}). En este capítulo abordamos en profundidad cómo \pkg{MLflow 3} unifica estas cinco capacidades en una plataforma cohesiva de LLMOps.
+
+% ============================================================================
+\section[MLflow Tracing (OpenTelemetry)]{MLflow Tracing: Observabilidad Profunda compatible con OpenTelemetry}\label{sec:mlflow-tracing}
+% ============================================================================
+
+Cuando un microservicio tradicional falla, un registro de texto plano (\textit{log}) con nivel \code{ERROR} y una traza de pila (\textit{stack trace}) suele bastar para localizar la línea culpable. En una cadena RAG o un agente autónomo, por el contrario, los fallos más costosos ocurren con código HTTP \code{200 OK} y sin lanzar ninguna excepción: el recuperador vectorial devolvió fragmentos irrelevantes de una versión obsoleta del manual, el \textit{reranker} descartó el párrafo crítico por un umbral mal calibrado, el LLM invocó una herramienta con argumentos mal formateados o entró en un bucle de reintentos que consumió 18\,000 \textit{tokens} y cuatro segundos de latencia antes de producir una respuesta aparentemente convincente pero falsa.
+
+Depurar ese tipo de comportamiento con \code{print()} o \textit{logs} no estructurados resulta inviable en producción: se pierde la relación padre--hijo entre operaciones anidadas, resulta imposible desglosar la latencia exacta de cada etapa y los mensajes concurrentes de múltiples usuarios se entremezclan. \textbf{MLflow Tracing} resuelve este vacío proporcionando observabilidad nativa construida directamente sobre las especificaciones de \textbf{OpenTelemetry (OTel)}.
+
+\subsection{Anatomía de una Trace y sus Spans en MLflow 3}\label{subsec:anatomia-trace}
+
+En el modelo de datos de \pkg{MLflow 3}, cada invocación completa de una aplicación GenAI genera una \textbf{Trace} compuesta por dos estructuras complementarias:
+
+\begin{itemize}
+  \item \textbf{\code{TraceInfo} (metadatos ligeros e indexables):} contiene el identificador único \code{trace\_id}, el experimento o \code{LoggedModel} asociado, la marca temporal de inicio (\code{timestamp\_ms}), la duración total (\code{execution\_duration}), el estado de finalización (\code{OK}, \code{ERROR}, \code{IN\_PROGRESS}), etiquetas de negocio (\code{tags}, tales como \code{mlflow.trace.user}, \code{mlflow.trace.session} o versión del \textit{prompt}), metadatos de petición y las evaluaciones vinculadas (\code{assessments}: feedback humano y puntuaciones de jueces LLM).
+  \item \textbf{\code{TraceData} (árbol completo de ejecución):} almacena la jerarquía padre--hijo de objetos \textbf{\code{Span}}, junto con la petición inicial y la respuesta final agregadas.
+\end{itemize}
+
+Cada \code{Span} representa una unidad atómica de trabajo dentro del grafo de ejecución y encapsula: \code{span\_id}, \code{parent\_id}, tipo semántico (\code{span\_type}), marcas temporales en nanosegundos (\code{start\_time\_ns}, \code{end\_time\_ns}), entradas y salidas serializadas (\code{inputs}, \code{outputs}), atributos clave-valor tipados (\code{attributes}, incluyendo métricas estandarizadas como \code{mlflow.chat.tokenUsage} con \code{input\_tokens}, \code{output\_tokens} y \code{total\_tokens}) y eventos de excepción o reintentos (\code{events}).
+
+Para que tanto la interfaz visual como los evaluadores automáticos comprendan la semántica de cada paso sin depender del \textit{framework} utilizado, MLflow define la enumeración \code{mlflow.entities.SpanType} con tipos normalizados: \code{AGENT} (orquestador raíz), \code{CHAIN} (flujo compuesto), \code{EMBEDDING} (vectorización), \code{RETRIEVER} (búsqueda documental), \code{RERANKER} (reordenación de pasajes), \code{LLM} y \code{CHAT\_MODEL} (llamadas generativas), \code{TOOL} (invocación de funciones o APIs externas) y \code{PARSER} (extracción estructurada).
+
+La Figura~\ref{fig:mlflow-trace-waterfall} muestra la vista en árbol y cascada temporal (\textit{waterfall}) de una traza real de un agente RAG de soporte que ejecuta seis operaciones encadenadas en 1\,420\,ms. Esta representación hace evidente de un vistazo dónde se consume el presupuesto de latencia (en este caso, las dos llamadas \code{LLM} concentran el 61\,\% del tiempo total) y permite inspeccionar exactamente qué documentos devolvió el \code{RETRIEVER} antes de que el \code{RERANKER} los filtrara.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[x=1cm, y=1cm]
+  % Cabeceras de columnas (ancho total 17.2 cm con columna derecha dedicada [14.2, 17.2])
+  \fill[PrimaryDark] (0, 6.4) rectangle (17.2, 7.05);
+  \node[anchor=west, text=white, font=\sffamily\footnotesize\bfseries] at (0.25, 6.72) {Jerarquía de Spans (Trace ID: \texttt{tr-8f4a9c})};
+  \node[anchor=center, text=white, font=\sffamily\footnotesize\bfseries] at (10.4, 6.72) {Cascada Temporal (\textit{Waterfall}: 0 -- 1\,420 ms)};
+  \node[anchor=east, text=white, font=\sffamily\footnotesize\bfseries] at (17.0, 6.72) {Duración / Tokens};
+
+  % Lineas verticales de escala temporal (x = 6.85 es 0 ms; x = 13.75 es 1420 ms -> escala 6.90 cm / 1420 ms)
+  \foreach \ms/\xpos in {0/6.85, 350/8.55, 700/10.25, 1050/11.95, 1420/13.75} {
+    \draw[LightBorder, dashed, line width=0.45pt] (\xpos, 0.35) -- (\xpos, 6.4);
+    \node[anchor=north, font=\sffamily\tiny, text=MutedGray] at (\xpos, 0.30) {\ms\,ms};
+  }
+
+  % Filas alternas sutiles
+  \foreach \y in {5.5, 3.7, 1.9} {
+    \fill[TableStripe!75] (0, \y) rectangle (17.2, \y+0.88);
+  }
+  \draw[LightBorder, line width=0.6pt] (0, 0.35) rectangle (17.2, 6.4);
+  \draw[LightBorder, line width=0.6pt] (6.6, 0.35) -- (6.6, 6.4);
+  \draw[LightBorder, line width=0.6pt] (14.15, 0.35) -- (14.15, 6.4);
+
+  % Span 0: AGENT raiz (0 - 1420 ms)
+  \node[fill=PrimaryDark, text=white, rounded corners=2pt, font=\sffamily\tiny\bfseries, inner sep=2pt, anchor=west] at (0.2, 5.95) {AGENT};
+  \node[anchor=west, font=\sffamily\scriptsize\bfseries, text=PrimaryDark] at (1.25, 5.95) {\texttt{soporte\_rag\_agent}};
+  \fill[PrimaryDark, rounded corners=2pt] (6.85, 5.78) rectangle (13.75, 6.12);
+  \node[anchor=center, text=white, font=\sffamily\tiny\bfseries] at (10.30, 5.95) {Ejecución completa end-to-end};
+  \node[anchor=east, font=\sffamily\scriptsize\bfseries, text=PrimaryDark] at (17.0, 5.95) {1\,420 ms};
+
+  % Conector arbol izquierdo
+  \draw[MutedGray, line width=0.7pt] (0.55, 5.70) -- (0.55, 0.85);
+
+  % Span 1: EMBEDDING (10 - 85 ms)
+  \draw[MutedGray, line width=0.7pt] (0.55, 5.05) -- (0.85, 5.05);
+  \node[fill=SecondaryBlue, text=white, rounded corners=2pt, font=\sffamily\tiny\bfseries, inner sep=2pt, anchor=west] at (0.90, 5.05) {EMBED};
+  \node[anchor=west, font=\sffamily\scriptsize, text=SlateText] at (1.92, 5.05) {\texttt{embed\_query} (text-emb-3)};
+  \fill[SecondaryBlue, rounded corners=2pt] (6.90, 4.90) rectangle (7.26, 5.20);
+  \node[anchor=west, font=\sffamily\tiny, text=MutedGray] at (7.35, 5.05) {10--85 ms};
+  \node[anchor=east, font=\sffamily\scriptsize, text=SlateText] at (17.0, 5.05) {75 ms / 28 tok};
+
+  % Span 2: RETRIEVER (85 - 210 ms)
+  \draw[MutedGray, line width=0.7pt] (0.55, 4.15) -- (0.85, 4.15);
+  \node[fill=TealAccent, text=white, rounded corners=2pt, font=\sffamily\tiny\bfseries, inner sep=2pt, anchor=west] at (0.90, 4.15) {RETRIEVER};
+  \node[anchor=west, font=\sffamily\scriptsize, text=SlateText] at (2.25, 4.15) {\texttt{pgvector\_search} (top\_k=12)};
+  \fill[TealAccent, rounded corners=2pt] (7.26, 4.00) rectangle (7.87, 4.30);
+  \node[anchor=west, font=\sffamily\tiny, text=MutedGray] at (7.96, 4.15) {85--210 ms (12 docs)};
+  \node[anchor=east, font=\sffamily\scriptsize, text=SlateText] at (17.0, 4.15) {125 ms};
+
+  % Span 3: RERANKER (210 - 355 ms)
+  \draw[MutedGray, line width=0.7pt] (0.55, 3.25) -- (0.85, 3.25);
+  \node[fill=TealAccent!75!black, text=white, rounded corners=2pt, font=\sffamily\tiny\bfseries, inner sep=2pt, anchor=west] at (0.90, 3.25) {RERANKER};
+  \node[anchor=west, font=\sffamily\scriptsize, text=SlateText] at (2.25, 3.25) {\texttt{cross\_encoder\_rerank} (top 4)};
+  \fill[TealAccent!75!black, rounded corners=2pt] (7.87, 3.10) rectangle (8.57, 3.40);
+  \node[anchor=west, font=\sffamily\tiny, text=MutedGray] at (8.66, 3.25) {210--355 ms (4 pasajes)};
+  \node[anchor=east, font=\sffamily\scriptsize, text=SlateText] at (17.0, 3.25) {145 ms};
+
+  % Span 4: LLM planificacion tool (355 - 740 ms)
+  \draw[MutedGray, line width=0.7pt] (0.55, 2.35) -- (0.85, 2.35);
+  \node[fill=PrimaryAccent, text=white, rounded corners=2pt, font=\sffamily\tiny\bfseries, inner sep=2pt, anchor=west] at (0.90, 2.35) {LLM};
+  \node[anchor=west, font=\sffamily\scriptsize, text=SlateText] at (1.65, 2.35) {\texttt{plan\_tool\_call} (gpt-4o-mini)};
+  \fill[PrimaryAccent, rounded corners=2pt] (8.57, 2.20) rectangle (10.45, 2.50);
+  \node[anchor=west, font=\sffamily\tiny, text=MutedGray] at (10.54, 2.35) {355--740 ms};
+  \node[anchor=east, font=\sffamily\scriptsize, text=SlateText] at (17.0, 2.35) {385 ms / 640 tok};
+
+  % Span 5: TOOL consulta ERP (740 - 920 ms)
+  \draw[MutedGray, line width=0.7pt] (0.55, 1.45) -- (0.85, 1.45);
+  \node[fill=AmberAccent, text=white, rounded corners=2pt, font=\sffamily\tiny\bfseries, inner sep=2pt, anchor=west] at (0.90, 1.45) {TOOL};
+  \node[anchor=west, font=\sffamily\scriptsize, text=SlateText] at (1.78, 1.45) {\texttt{consultar\_estado\_pedido}};
+  \fill[AmberAccent, rounded corners=2pt] (10.45, 1.30) rectangle (11.32, 1.60);
+  \node[anchor=west, font=\sffamily\tiny, text=MutedGray] at (11.41, 1.45) {740--920 ms (HTTP 200)};
+  \node[anchor=east, font=\sffamily\scriptsize, text=SlateText] at (17.0, 1.45) {180 ms};
+
+  % Span 6: LLM generacion final (920 - 1410 ms)
+  \draw[MutedGray, line width=0.7pt] (0.55, 0.78) -- (0.85, 0.78);
+  \node[fill=EmeraldAccent, text=white, rounded corners=2pt, font=\sffamily\tiny\bfseries, inner sep=2pt, anchor=west] at (0.90, 0.78) {LLM};
+  \node[anchor=west, font=\sffamily\scriptsize, text=SlateText] at (1.65, 0.78) {\texttt{generar\_respuesta\_final}};
+  \fill[EmeraldAccent, rounded corners=2pt] (11.32, 0.63) rectangle (13.70, 0.93);
+  \node[anchor=center, text=white, font=\sffamily\tiny\bfseries] at (12.51, 0.78) {920--1\,410 ms};
+  \node[anchor=east, font=\sffamily\scriptsize, text=SlateText] at (17.0, 0.78) {490 ms / 890 tok};
+\end{tikzpicture}%
+}
+\caption{Vista jerárquica y en cascada (\textit{waterfall}) de una traza OpenTelemetry en MLflow Tracing para un agente RAG multi-paso con recuperación vectorial, \textit{reranker} y llamada a herramienta externa.}
+\label{fig:mlflow-trace-waterfall}
+\end{figure}
+
+\subsection{Autologging en una línea e instrumentación manual avanzada}\label{subsec:tracing-codigo}
+
+Una de las ventajas prácticas de \pkg{MLflow 3} es que ofrece cobertura automática inmediata sobre prácticamente todo el ecosistema GenAI mediante llamadas \code{autolog()} de una sola línea:
+
+\begin{itemize}
+  \item \code{mlflow.openai.autolog()} --- intercepta llamadas a OpenAI Chat Completions, Responses API, Embeddings y OpenAI Agents SDK.
+  \item \code{mlflow.langchain.autolog()} --- captura cadenas, grafos \pkg{LangGraph}, recuperadores y herramientas.
+  \item \code{mlflow.anthropic.autolog()} --- instrumenta llamadas a la familia Claude incluyendo bloques de \textit{tool use} y pensamiento extendido.
+  \item \code{mlflow.llama\_index.autolog()} --- traza índices vectoriales, motores de consulta y síntesis de respuestas en LlamaIndex.
+  \item \code{mlflow.litellm.autolog()} --- proporciona trazado unificado sobre más de cien proveedores a través de LiteLLM.
+\end{itemize}
+
+Además, gracias a su arquitectura compatible con OpenTelemetry, MLflow puede tanto exportar trazas hacia colectores corporativos existentes (Datadog, Grafana Tempo, Jaeger, Honeycomb) mediante OTLP como ingerir trazas procedentes de microservicios externos instrumentados con el SDK estándar de OpenTelemetry.
+
+Cuando una aplicación combina llamadas SDK con lógica de negocio propia (por ejemplo, una consulta SQL híbrida contra \code{pgvector} o un \textit{reranker} personalizado), el trazado automático se complementa con dos primitivas de instrumentación manual: el decorador declarativo \code{@mlflow.trace} y el gestor de contexto imperativo \code{with mlflow.start\_span(...) as span:}. Adicionalmente, \code{mlflow.update\_current\_trace()} enriquece la traza activa con metadatos de sesión, usuario y versión exacta del \textit{prompt} cargado, tal como muestra el Listado~\ref{lst:mlflow-tracing-manual}.
+
+\begin{lstlisting}[style=python, caption={Instrumentación híbrida en MLflow Tracing: autologging de OpenAI, decorador \code{@mlflow.trace}, gestor de contexto \code{start\_span} y enriquecimiento de metadatos de sesión.}, label={lst:mlflow-tracing-manual}]
+import mlflow
+from mlflow.entities import SpanType
+from openai import OpenAI
+
+mlflow.set_experiment("observabilidad-agente-rag")
+
+# Autologging automatico de todas las llamadas al SDK de OpenAI
+mlflow.openai.autolog()
+client = OpenAI()
+
+@mlflow.trace(name="pgvector_search", span_type=SpanType.RETRIEVER)
+def recuperar_documentos(query: str, top_k: int = 8) -> list[dict]:
+    # Simulacion de busqueda hibrida BM25 + similitud coseno en pgvector
+    return [
+        {
+            "doc_id": "POL-DEV-04",
+            "score": 0.91,
+            "content": "Devoluciones permitidas hasta 30 dias naturales tras la entrega.",
+        },
+        {
+            "doc_id": "POL-ENV-11",
+            "score": 0.78,
+            "content": "Los gastos de retorno son gratuitos en productos defectuosos.",
+        },
+    ][:top_k]
+
+@mlflow.trace(name="consultar_estado_pedido", span_type=SpanType.TOOL)
+def consultar_pedido(order_id: str) -> dict:
+    # Llamada controlada a microservicio interno de pedidos
+    return {"order_id": order_id, "estado": "entregado", "dias_desde_entrega": 14}
+
+@mlflow.trace(name="soporte_rag_agent", span_type=SpanType.AGENT)
+def responder_usuario(
+    query: str,
+    order_id: str,
+    user_id: str,
+    session_id: str,
+) -> str:
+    # 1. Cargar prompt de produccion y registrar contexto de negocio en la traza
+    prompt = mlflow.genai.load_prompt("prompts:/soporte_cliente@production")
+    mlflow.update_current_trace(
+        tags={
+            "mlflow.trace.user": user_id,
+            "mlflow.trace.session": session_id,
+            "canal": "web_chat",
+            "prompt_uri": prompt.uri,
+        },
+        metadata={"order_id": order_id, "entorno": "produccion"},
+    )
+
+    # 2. Recuperacion documental (genera span RETRIEVER hijo automaticamente)
+    candidatos = recuperar_documentos(query, top_k=5)
+
+    # 3. Span manual con gestor de contexto para controlar atributos granulares
+    with mlflow.start_span(name="cross_encoder_rerank", span_type=SpanType.RERANKER) as span:
+        span.set_inputs({"query": query, "num_candidatos": len(candidatos)})
+        filtrados = [d for d in candidatos if d["score"] >= 0.80]
+        span.set_attribute("rerank_threshold", 0.80)
+        span.set_attribute("docs_descartados", len(candidatos) - len(filtrados))
+        span.set_outputs({"seleccionados": [d["doc_id"] for d in filtrados]})
+
+    # 4. Invocacion de herramienta para verificar el pedido en tiempo real
+    pedido = consultar_pedido(order_id)
+
+    # 5. Generacion final (capturada automaticamente por mlflow.openai.autolog)
+    contexto = "\n".join(f"[{d['doc_id']}] {d['content']}" for d in filtrados)
+    contexto += f"\n[ERP] Pedido {pedido['order_id']}: {pedido['estado']} ({pedido['dias_desde_entrega']} dias)."
+    rendered = prompt.format(context=contexto, question=query)
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini-2024-07-18",
+        temperature=0.0,
+        messages=[{"role": "user", "content": rendered}],
+    )
+    return resp.choices[0].message.content
+\end{lstlisting}
+
+% ============================================================================
+\section[Evaluación de LLMs y RAG]{Evaluación Rigurosa de LLMs y Sistemas RAG (\texorpdfstring{\code{mlflow.genai.evaluate}}{mlflow.genai.evaluate})}\label{sec:genai-evaluate}
+% ============================================================================
+
+La observabilidad muestra \emph{qué ocurrió} en cada ejecución; la evaluación responde sistemáticamente \emph{si ocurrió bien}. En sistemas generativos, evaluar la calidad constituye el desafío metodológico más delicado de todo el ciclo de vida LLMOps.
+
+\subsection{El trilema de la evaluación GenAI y los sesgos del \textit{LLM-as-a-Judge}}\label{subsec:trilema-sesgos-juez}
+
+Todo equipo de ingeniería GenAI se enfrenta al \textbf{trilema de evaluación} entre tres familias de técnicas, ninguna perfecta por sí sola:
+
+\begin{enumerate}
+  \item \textbf{Evaluación humana experta:} es el estándar de oro para capturar matices legales, clínicos o de tono corporativo, pero es lenta, costosa y no escala a cien ejecuciones semanales dentro de un flujo CI/CD.
+  \item \textbf{Métricas léxicas clásicas (BLEU, ROUGE-L, METEOR, coincidencia exacta):} son instantáneas y deterministas, pero miden únicamente solapamiento superficial de \textit{n}-gramas. Dos respuestas semánticamente opuestas (``el contrato \emph{cubre} daños'' frente a ``el contrato \emph{no cubre} daños'') obtienen un ROUGE elevadísimo, mientras que una paráfrasis brillante recibe una penalización injusta.
+  \item \textbf{\textit{LLM-as-a-Judge} (evaluación asistida por modelos jueces):} utiliza un LLM de alta capacidad guiado por una rúbrica explícita para juzgar fidelidad, exactitud semántica, tono o cumplimiento de políticas a gran escala y generando explicaciones legibles.
+\end{enumerate}
+
+Pese a su enorme potencia, emplear jueces LLM sin cautela metodológica introduce \textbf{cuatro sesgos sistemáticos bien documentados} en la literatura empírica:
+
+\begin{itemize}
+  \item \textbf{Sesgo de posición (\textit{position bias}):} en comparaciones por pares (A frente a B), los jueces tienden a favorecer sistemáticamente la primera respuesta presentada (o en ciertos modelos la última).
+  \item \textbf{Sesgo de verbosidad (\textit{verbosity bias}):} los jueces LLM asignan puntuaciones más altas a respuestas largas, bien formateadas con listas numeradas y tono seguro, incluso cuando contienen menos información útil o algún error sutil.
+  \item \textbf{Auto-preferencia de familia (\textit{self-preference bias}):} un modelo juez tiende a puntuar por encima de su mérito real los textos generados por modelos de su propia familia (por ejemplo, GPT-4o juzgando salidas de GPT-4o frente a salidas de Claude), debido a la mayor probabilidad asignada bajo su propia distribución de entrenamiento.
+  \item \textbf{Indulgencia en escalas difusas:} pedir a un juez una nota continua del 1 al 10 sin anclajes concretos produce puntuaciones concentradas entre 7 y 9 con altísima varianza entre ejecuciones.
+\end{itemize}
+
+\begin{infobox}[Protocolo de mitigación de sesgos y calibración con Kappa de Cohen]
+Para construir jueces LLM fiables en entornos profesionales conviene aplicar cuatro salvaguardas obligatorias:
+\begin{enumerate}
+  \item \textbf{Rúbricas binarias o discretas estrictamente ancladas} (\code{PASS/FAIL} o escala de 3 niveles con criterios observables de fallo).
+  \item \textbf{Razonamiento previo al veredicto:} forzar al juez a emitir primero el campo \code{rationale} analizando evidencias y solo después el campo \code{value}, reduciendo drásticamente los veredictos impulsivos.
+  \item \textbf{Diversidad de modelo y permutación:} emplear un juez de familia distinta o de mayor capacidad razonadora que el modelo evaluado, y en pruebas A/B ejecutar dos pasadas intercambiando el orden (A--B y B--A), aceptando ganador únicamente cuando ambos órdenes coinciden.
+  \item \textbf{Calibración estadística frente a etiquetas humanas mediante el coeficiente Kappa de Cohen ($\kappa$):} sobre una muestra anotada por expertos ($n \ge 50$), se mide la concordancia corregida por azar entre el juez humano y el juez LLM:
+  \begin{equation}\label{eq:cohen-kappa}
+    \kappa = \frac{p_o - p_e}{1 - p_e},
+  \end{equation}
+  donde $p_o$ es la proporción de acuerdo observado y $p_e$ es el acuerdo esperado por puro azar dadas las distribuciones marginales. En ingeniería de evaluación se busca $\kappa \ge 0.80$ (acuerdo casi perfecto) antes de utilizar el juez como puerta automática de CI/CD; valores $0.60 \le \kappa < 0.80$ indican una rúbrica usable para seguimiento, mientras que $\kappa < 0.60$ exige reescribir los criterios del juez o incorporar ejemplos calibrados (\textit{few-shot alignment}).
+\end{enumerate}
+\end{infobox}
+
+\subsection{Scorers integrados y personalizados en \texorpdfstring{\code{mlflow.genai}}{mlflow.genai}}\label{subsec:scorers-mlflow}
+
+\pkg{MLflow 3} unifica la evaluación tanto \textit{offline} (durante desarrollo y CI/CD) como \textit{online} (sobre trazas de producción) bajo la abstracción de \textbf{Scorers} en el paquete \code{mlflow.genai.scorers}. Todos los \textit{scorers} devuelven objetos \code{Feedback} tipados con valor y justificación (\code{rationale}), y se dividen en tres categorías:
+
+\begin{enumerate}
+  \item \textbf{Scorers integrados listos para producción (\code{mlflow.genai.scorers}):}
+    \begin{itemize}
+      \item \code{Correctness}: contrasta semánticamente la respuesta generada con la verdad terreno (\code{expectations}) comprobando si todos los hechos clave coinciden.
+      \item \code{Safety}: detecta contenido tóxico, peligroso, discurso de odio o instrucciones ilícitas.
+      \item \code{RelevanceToQuery}: verifica si la respuesta contesta de forma directa y pertinente a la pregunta planteada sin divagar.
+      \item \code{RetrievalGroundedness}: audita si cada afirmación de la respuesta está estrictamente respaldada por los fragmentos devueltos en los spans \code{RETRIEVER} de la traza (detector directo de alucinaciones).
+      \item \code{RetrievalRelevance}: evalúa si los documentos recuperados son pertinentes para la consulta del usuario.
+      \item \code{RetrievalSufficiency}: determina si el conjunto de fragmentos recuperados contenía toda la evidencia necesaria para construir la respuesta esperada (separa errores del recuperador frente a errores del generador).
+      \item \code{Guidelines}: permite declarar políticas corporativas en lenguaje natural (tono formal, prohibición de mencionar competidores, idioma obligatorio) que se evalúan como criterios \code{PASS/FAIL}.
+    \end{itemize}
+  \item \textbf{Jueces LLM personalizados y conscientes de la traza (\code{make\_judge}):} la fábrica \code{mlflow.genai.judges.make\_judge} permite crear jueces a medida referenciando las variables de plantilla \code{\{\{ inputs \}\}}, \code{\{\{ outputs \}\}}, \code{\{\{ expectations \}\}} y ---crucialmente para agentes--- \code{\{\{ trace \}\}}. Un juez \textit{trace-aware} puede inspeccionar los spans intermedios de una ejecución para auditar reglas procedimentales imposibles de comprobar mirando solo el texto final: por ejemplo, verificar que el agente invocó efectivamente la herramienta \code{consultar\_estado\_pedido} y comprobó que \code{dias\_desde\_entrega <= 30} \emph{antes} de aprobar un reembolso.
+  \item \textbf{Scorers deterministas en Python (\code{@scorer}):} cualquier función Python decorada con \code{@scorer} puede ejecutar comprobaciones rápidas, gratuitas y 100\,\% reproducibles sobre entradas, salidas o el objeto \code{trace}: validación de esquemas JSON/Pydantic, detección por expresiones regulares de fugas de PII (tarjetas, DNI, correos), verificación de presupuesto de latencia (\code{trace.info.execution\_duration}) o comprobación de presencia obligatoria de citas documentales (\code{[POL-...]}).
+\end{enumerate}
+
+\subsection{Evaluación específica de sistemas RAG: Triada de RAG y métricas de recuperación}\label{subsec:evaluacion-rag}
+
+En una arquitectura RAG, un error en la respuesta final puede tener dos causas raíz completamente distintas: o bien el motor de búsqueda no recuperó el fragmento correcto (\textbf{fallo de recuperación}), o bien sí lo recuperó pero el LLM lo ignoró o inventó información externa (\textbf{fallo de generación}). Mezclar ambos errores en una única métrica impide saber si debemos mejorar el \textit{chunking}, el modelo de \textit{embeddings} y el \textit{reranker}, o bien reescribir el \textit{prompt}.
+
+Para aislar ambas capas se emplea conjuntamente la \textbf{Triada de RAG} ---que se mapea uno a uno sobre los \textit{scorers} de MLflow: \textit{Context Relevance} (\code{RetrievalRelevance}), \textit{Faithfulness / Groundedness} (\code{RetrievalGroundedness}) y \textit{Answer Relevance} (\code{RelevanceToQuery}), complementados por \code{RetrievalSufficiency}--- junto con las métricas clásicas de Recuperación de Información (IR) cuando se dispone de los identificadores de documentos relevantes $D_{\text{rel}}(q)$ para cada consulta $q \in Q$:
+
+\begin{equation}\label{eq:ir-recall-mrr}
+  \text{Recall}@k = \frac{|D_{\text{rel}} \cap R_k|}{|D_{\text{rel}}|},
+  \qquad
+  \text{MRR} = \frac{1}{|Q|} \sum_{q=1}^{|Q|} \frac{1}{\text{rank}_q},
+\end{equation}
+donde $R_k$ es el conjunto ordenado de los $k$ primeros documentos recuperados y $\text{rank}_q$ es la posición del primer documento relevante para la consulta $q$. Cuando la relevancia es graduada ($\text{rel}_i \in \{0, 1, 2, 3\}$ según utilidad decreciente) y el orden de los fragmentos importa por el fenómeno \textit{lost-in-the-middle} de los LLMs, se emplea la Ganancia Acumulada Descontada Normalizada:
+\begin{equation}\label{eq:ir-ndcg}
+  \text{DCG}@k = \sum_{i=1}^{k} \frac{2^{\text{rel}_i} - 1}{\log_2(i + 1)},
+  \qquad
+  \text{NDCG}@k = \frac{\text{DCG}@k}{\text{IDCG}@k},
+\end{equation}
+siendo $\text{IDCG}@k$ la $\text{DCG}@k$ ideal obtenida ordenando los documentos en orden estrictamente decreciente de relevancia. Si $\text{Recall}@k$ y \code{RetrievalSufficiency} son bajos, ajustar el \textit{prompt} resultará estéril: primero debe optimizarse la ingesta documental, la búsqueda híbrida (densa + BM25) o el \textit{reranker}.
+
+El Listado~\ref{lst:genai-evaluate-rag} muestra una evaluación integral en \pkg{MLflow 3} sobre un \textit{pipeline} RAG/agente que combina \textit{scorers} integrados, un juez \textit{trace-aware} con \code{make\_judge} y dos \textit{scorers} deterministas en Python.
+
+\begin{lstlisting}[style=python, caption={Evaluación integral de un sistema RAG/Agente con \code{mlflow.genai.evaluate}, scorers integrados, juez \textit{trace-aware} (\code{make\_judge}) y scorers deterministas (\code{@scorer}).}, label={lst:genai-evaluate-rag}]
+import re
+import mlflow
+from mlflow.entities import Feedback, SpanType, Trace
+from mlflow.genai.judges import make_judge
+from mlflow.genai.scorers import (
+    Correctness,
+    Guidelines,
+    RelevanceToQuery,
+    RetrievalGroundedness,
+    RetrievalRelevance,
+    RetrievalSufficiency,
+    Safety,
+    scorer,
+)
+from openai import OpenAI
+
+mlflow.set_experiment("evaluacion-rag-soporte")
+mlflow.openai.autolog()
+client = OpenAI()
+
+# 1. Pipeline RAG bajo evaluacion (instrumentado con SpanType.RETRIEVER)
+@mlflow.trace(name="retriever_manuales", span_type=SpanType.RETRIEVER)
+def buscar_politicas(query: str) -> list[dict]:
+    base_conocimiento = [
+        {
+            "doc_id": "POL-DEV-04",
+            "content": "Plazo de devolucion: 30 dias naturales desde la entrega.",
+        },
+        {
+            "doc_id": "POL-GAR-02",
+            "content": "Garantia hardware: 3 anos en UE frente a defectos de fabrica.",
+        },
+    ]
+    return base_conocimiento
+
+@mlflow.trace(name="verificar_pedido_erp", span_type=SpanType.TOOL)
+def verificar_pedido_erp(order_id: str) -> dict:
+    return {"order_id": order_id, "dias_desde_entrega": 18, "estado": "entregado"}
+
+@mlflow.trace(name="rag_predict", span_type=SpanType.AGENT)
+def rag_predict(question: str, order_id: str) -> str:
+    docs = buscar_politicas(question)
+    pedido = verificar_pedido_erp(order_id)
+    contexto = "\n".join(f"[{d['doc_id']}] {d['content']}" for d in docs)
+    contexto += f"\n[ERP] Pedido {pedido['order_id']}: {pedido['dias_desde_entrega']} dias."
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini-2024-07-18",
+        temperature=0.0,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Responde en espanol citando explicitamente el codigo [POL-...] "
+                    "y el resultado del pedido sin inventar datos."
+                ),
+            },
+            {"role": "user", "content": f"Contexto:\n{contexto}\n\nPregunta: {question}"},
+        ],
+    )
+    return resp.choices[0].message.content
+
+# 2. Juez LLM personalizado trace-aware: audita el uso correcto de herramientas
+auditor_herramienta = make_judge(
+    name="uso_obligatorio_herramienta_erp",
+    instructions=(
+        "Inspecciona la traza completa de ejecucion en {{ trace }}. "
+        "Verifica si el agente invoco la herramienta 'verificar_pedido_erp' ANTES "
+        "de emitir la respuesta final en {{ outputs }} para validar el plazo real "
+        "de entrega del pedido solicitado en {{ inputs }}. "
+        "Responde PASS solo si la herramienta se ejecuto correctamente y la respuesta "
+        "final es coherente con el valor 'dias_desde_entrega' devuelto."
+    ),
+    model="openai:/gpt-4o",
+)
+
+# 3. Scorers deterministas en Python (rapidos, gratuitos y reproducibles)
+PII_PATTERN = re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b|\b\d{8}[A-Za-z]\b")
+CITATION_PATTERN = re.compile(r"\[POL-[A-Z]{3}-\d{2}\]")
+
+@scorer
+def sin_fuga_pii_y_con_citas(outputs: str) -> list[Feedback]:
+    has_pii = bool(PII_PATTERN.search(outputs or ""))
+    has_citation = bool(CITATION_PATTERN.search(outputs or ""))
+    return [
+        Feedback(
+            name="sin_pii",
+            value=not has_pii,
+            rationale="Detectado patron de tarjeta o DNI." if has_pii else "Sin PII visible.",
+        ),
+        Feedback(
+            name="citas_obligatorias",
+            value=has_citation,
+            rationale="Incluye cita [POL-...]." if has_citation else "Falta cita normativa.",
+        ),
+    ]
+
+@scorer
+def presupuesto_latencia(trace: Trace) -> Feedback:
+    duration_ms = trace.info.execution_duration or 0
+    ok = duration_ms <= 2500
+    return Feedback(
+        name="latencia_sla_ok",
+        value=ok,
+        rationale=f"Duracion total: {duration_ms} ms (SLA <= 2500 ms).",
+    )
+
+# 4. Dataset de evaluacion con inputs y ground-truth (expectations)
+eval_data = [
+    {
+        "inputs": {
+            "question": "Puedo devolver mi pedido ORD-901 si me llego hace menos de un mes?",
+            "order_id": "ORD-901",
+        },
+        "expectations": {
+            "expected_facts": [
+                "El plazo de devolucion es de 30 dias naturales desde la entrega.",
+                "El pedido ORD-901 lleva 18 dias entregado, por lo que esta dentro de plazo.",
+            ]
+        },
+    },
+]
+
+# 5. Ejecucion unificada con mlflow.genai.evaluate
+with mlflow.start_run(run_name="eval_rag_v2_integral"):
+    results = mlflow.genai.evaluate(
+        data=eval_data,
+        predict_fn=rag_predict,
+        scorers=[
+            Correctness(model="openai:/gpt-4o"),
+            Safety(),
+            RelevanceToQuery(model="openai:/gpt-4o"),
+            RetrievalGroundedness(model="openai:/gpt-4o"),
+            RetrievalRelevance(model="openai:/gpt-4o"),
+            RetrievalSufficiency(model="openai:/gpt-4o"),
+            Guidelines(
+                name="tono_profesional_es",
+                guidelines="La respuesta debe redactarse en espanol formal y conciso.",
+                model="openai:/gpt-4o",
+            ),
+            auditor_herramienta,
+            sin_fuga_pii_y_con_citas,
+            presupuesto_latencia,
+        ],
+    )
+
+# 6. Inspeccion de metricas agregadas y diagnostico fila por fila
+print("Metricas agregadas:", results.metrics)
+eval_df = results.tables["eval_results"]
+print(eval_df[["inputs", "outputs", "correctness/value", "retrieval_groundedness/value"]])
+\end{lstlisting}
+
+La Tabla~\ref{tab:dimensiones-eval-genai} consolida las cuatro dimensiones fundamentales de evaluación en sistemas GenAI y sirve como lista de verificación arquitectónica al diseñar baterías de certificación.
+
+\begin{table}[htbp]
+\centering
+\caption{Resumen de dimensiones de evaluación GenAI y su implementación en \pkg{MLflow 3}.}
+\label{tab:dimensiones-eval-genai}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.2cm} L{3.65cm} C{2.1cm} L{2.35cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Dimensión} &
+\textcolor{white}{\sffamily\bfseries Scorers / Métricas} &
+\textcolor{white}{\sffamily\bfseries Método} &
+\textcolor{white}{\sffamily\bfseries Datos requeridos} &
+\textcolor{white}{\sffamily\bfseries Objetivo típico en producción} \\
+\midrule
+Calidad funcional y negocio &
+\code{Correctness}, \code{Guidelines}, exactitud JSON, juez \code{make\_judge}. &
+LLM-Judge + Determinista &
+\code{inputs}, \code{outputs}, \code{expectations}, \code{trace} &
+$\ge 90$\,\% exactitud semántica; 100\,\% validez de esquema y cumplimiento de política. \\
+\rowcolor{TableStripe}
+Fidelidad y recuperación RAG &
+\code{RetrievalGroundedness}, \code{RetrievalRelevance}, \code{RetrievalSufficiency}, $\text{Recall}@k$, $\text{NDCG}@k$. &
+LLM-Judge + IR clásico &
+\code{trace} (spans \code{RETRIEVER}), \code{expectations} &
+Groundedness $\ge 95$\,\%, $\text{Recall}@5 \ge 90$\,\% para minimizar alucinaciones. \\
+Seguridad y \textit{guardrails} &
+\code{Safety}, regex PII, pruebas de \textit{prompt injection} y fuga de instrucciones. &
+LLM-Judge + Determinista &
+\code{inputs}, \code{outputs} &
+100\,\% en casos adversariales críticos; cero exposición de PII o secretos. \\
+\rowcolor{TableStripe}
+Eficiencia operativa y FinOps &
+Latencia p50/p95, TTFT, \textit{tokens}/s, coste USD/1k, tasa de bucles de herramientas. &
+Determinista sobre \code{Trace} &
+\code{trace.info}, atributos de \textit{tokens} &
+TTFT $< 800$\,ms, p95 $< 2.5$\,s y coste dentro del presupuesto mensual FinOps. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================================
+\section[Agentes: Models from Code y ResponsesAgent]{Empaquetado y Despliegue de Agentes: Models from Code y \texorpdfstring{\code{ResponsesAgent}}{ResponsesAgent}}\label{sec:agents-responses}
+% ============================================================================
+
+Una vez que un agente RAG o multi-herramienta supera todas las puertas de evaluación, llega el momento de empaquetarlo, registrarlo en el Model Registry y desplegarlo como un servicio escalable. Es precisamente en este punto donde las prácticas heredadas del MLOps clásico sufren una ruptura técnica importante.
+
+\subsection{El problema histórico de \texorpdfstring{\code{pickle}}{pickle} y el paradigma \textit{Models from Code}}\label{subsec:models-from-code}
+
+En MLflow clásico, el patrón por defecto para registrar modelos personalizados consistía en serializar una instancia viva de Python en memoria mediante \code{pickle} o \code{cloudpickle}. Para un modelo \pkg{scikit-learn} ---básicamente arrays de NumPy y coeficientes numéricos--- este enfoque resulta cómodo y robusto. Para una aplicación GenAI moderna, sin embargo, la serialización binaria con \code{cloudpickle} es un anti-patrón severo por cuatro motivos:
+
+\begin{itemize}
+  \item \textbf{Objetos no serializables en memoria:} los agentes mantienen clientes HTTP asíncronos (\pkg{httpx}, \code{OpenAI()}), grupos de conexiones SSL/TCP hacia bases vectoriales, \textit{locks} de concurrencia y grafos compilados de \pkg{LangGraph} o \pkg{LlamaIndex} que fallan al serializarse o se corrompen al deserializarse.
+  \item \textbf{Captura accidental de secretos:} una clausura (\textit{closure}) capturada por \code{cloudpickle} puede serializar accidentalmente claves API (\code{OPENAI\_API\_KEY}) o credenciales de base de datos en claro dentro del artefacto \code{python\_model.pkl}.
+  \item \textbf{Fragilidad entre versiones de Python y dependencias:} basta actualizar una versión menor de \pkg{Pydantic} o \pkg{LangChain} entre el entorno de desarrollo y el contenedor de inferencia para que la deserialización falle con errores opacos de atributos faltantes.
+  \item \textbf{Opacidad en auditorías de seguridad:} un archivo binario \code{.pkl} no es legible por humanos, no admite revisión \code{git diff} y supone un vector conocido de ejecución arbitraria de código.
+\end{itemize}
+
+\pkg{MLflow 3} resuelve definitivamente este problema mediante el paradigma \textbf{Models from Code}: en lugar de serializar objetos en memoria, se registra directamente el archivo fuente Python limpio del agente declarando al final \code{mlflow.models.set\_model(agent)} y parametrizando su comportamiento externo mediante un archivo YAML tipado (\code{mlflow.models.ModelConfig}). Al cargarse en producción, el servidor de inferencia importa el módulo Python con las credenciales inyectadas de forma segura desde el entorno, sin utilizar \code{pickle} en ningún momento.
+
+\subsection{La interfaz estándar \texorpdfstring{\code{ResponsesAgent}}{ResponsesAgent} de MLflow 3}\label{subsec:responses-agent}
+
+\begin{modernbox}[{Evolución hacia \code{ResponsesAgent} en MLflow 3 \badge[PrimaryAccent]{MLflow 3}}]
+En versiones anteriores de MLflow existían clases como \code{ChatModel} o \code{ChatAgent} orientadas a intercambios simples pregunta--respuesta. Con la madurez de los agentes autónomos en 2025--2026, \pkg{MLflow 3} estandariza \code{mlflow.pyfunc.ResponsesAgent}, alineado con la especificación \textit{OpenAI Responses API}:
+\begin{itemize}
+  \item \textbf{Contrato tipado multi-turno y multi-item:} recibe un objeto \code{ResponsesAgentRequest} (\code{input: list[Message]}) y devuelve \code{ResponsesAgentResponse} compuesto por múltiples elementos heterogéneos: mensajes de texto (\code{create\_text\_output\_item}), invocaciones de herramientas (\code{create\_function\_call\_item}) y resultados de herramientas (\code{create\_function\_call\_output\_item}), haciendo transparente cada paso intermedio del agente.
+  \item \textbf{Streaming nativo de eventos:} mediante \code{predict\_stream()} emite objetos \code{ResponsesAgentStreamEvent} en tiempo real, permitiendo mostrar al usuario tanto la generación progresiva de \textit{tokens} como indicadores de estado mientras se ejecutan herramientas.
+  \item \textbf{Cero \textit{vendor lock-in}:} actúa como fachada uniforme sobre cualquier motor interno ---\pkg{LangGraph}, \pkg{OpenAI Agents SDK}, \pkg{LlamaIndex}, \pkg{AutoGen} o Python puro--- garantizando compatibilidad automática con \code{mlflow.genai.evaluate()}, trazado OTel, \code{Model Registry} y servidores de inferencia productivos.
+\end{itemize}
+\end{modernbox}
+
+Los Listados~\ref{lst:responses-agent-code} y~\ref{lst:log-agent-from-code} presentan un ejemplo completo y modular listo para producción: primero se define el agente desacoplado en \code{soporte\_agent.py} cargando su configuración desde \code{ModelConfig} y su plantilla desde el Prompt Registry (\code{@production}); a continuación se registra mediante \textit{Models from Code} como \code{LoggedModel} versionado en MLflow 3.
+
+\begin{lstlisting}[style=python, caption={Implementación completa de un agente de soporte con herramientas tipadas, \textit{streaming} y Prompt Registry mediante \code{ResponsesAgent} (\code{soporte\_agent.py}).}, label={lst:responses-agent-code}]
+# Archivo: soporte_agent.py
+import json
+import uuid
+from typing import Generator
+
+import mlflow
+from mlflow.entities import SpanType
+from mlflow.models import ModelConfig
+from mlflow.pyfunc import ResponsesAgent
+from mlflow.types.responses import (
+    ResponsesAgentRequest,
+    ResponsesAgentResponse,
+    ResponsesAgentStreamEvent,
+)
+from openai import OpenAI
+
+# Activar trazado automatico del SDK de OpenAI
+mlflow.openai.autolog()
+
+# Definicion de herramientas tipadas (JSON Schema) expuestas al LLM
+TOOLS_SPEC = [
+    {
+        "type": "function",
+        "function": {
+            "name": "consultar_pedido",
+            "description": "Obtiene el estado y dias desde la entrega de un pedido.",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string"}},
+                "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "consultar_politica",
+            "description": "Recupera la politica corporativa vigente para un tema.",
+            "parameters": {
+                "type": "object",
+                "properties": {"tema": {"type": "string"}},
+                "required": ["tema"],
+            },
+        },
+    },
+]
+
+@mlflow.trace(name="tool_consultar_pedido", span_type=SpanType.TOOL)
+def consultar_pedido(order_id: str) -> dict:
+    return {"order_id": order_id, "estado": "entregado", "dias_desde_entrega": 16}
+
+@mlflow.trace(name="tool_consultar_politica", span_type=SpanType.RETRIEVER)
+def consultar_politica(tema: str) -> dict:
+    return {
+        "doc_id": "POL-DEV-04",
+        "tema": tema,
+        "texto": "Devoluciones aceptadas hasta 30 dias naturales desde la entrega.",
+    }
+
+TOOL_REGISTRY = {
+    "consultar_pedido": consultar_pedido,
+    "consultar_politica": consultar_politica,
+}
+
+class SoporteResponsesAgent(ResponsesAgent):
+    def __init__(self):
+        # Cargar configuracion externa desacoplada del codigo (YAML)
+        self.cfg = ModelConfig(development_config="agent_config.yaml")
+        self.model_name = self.cfg.get("model_name")
+        self.prompt_uri = self.cfg.get("prompt_uri")
+        self.gateway_url = self.cfg.get("gateway_base_url")
+        self.max_tool_turns = int(self.cfg.get("max_tool_turns"))
+        self.client = OpenAI(base_url=self.gateway_url)
+
+    def _build_messages(self, request: ResponsesAgentRequest) -> list[dict]:
+        prompt = mlflow.genai.load_prompt(self.prompt_uri, cache_ttl_seconds=300)
+        system_msg = {
+            "role": "system",
+            "content": prompt.format(context="Usa siempre las herramientas disponibles.", question=""),
+        }
+        history = [
+            {"role": item.role, "content": item.content}
+            for item in request.input
+            if getattr(item, "role", None) and getattr(item, "content", None)
+        ]
+        return [system_msg] + history
+
+    @mlflow.trace(name="soporte_responses_agent", span_type=SpanType.AGENT)
+    def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
+        messages = self._build_messages(request)
+        output_items = []
+
+        for _ in range(self.max_tool_turns):
+            completion = self.client.chat.completions.create(
+                model=self.model_name,
+                temperature=0.0,
+                messages=messages,
+                tools=TOOLS_SPEC,
+            )
+            msg = completion.choices[0].message
+
+            if not msg.tool_calls:
+                output_items.append(
+                    self.create_text_output_item(
+                        text=msg.content or "",
+                        id=f"msg_{uuid.uuid4().hex[:8]}",
+                    )
+                )
+                return ResponsesAgentResponse(output=output_items)
+
+            messages.append(msg.model_dump())
+            for call in msg.tool_calls:
+                fn_name = call.function.name
+                fn_args = json.loads(call.function.arguments)
+                output_items.append(
+                    self.create_function_call_item(
+                        id=f"fc_{call.id}",
+                        call_id=call.id,
+                        name=fn_name,
+                        arguments=call.function.arguments,
+                    )
+                )
+                tool_result = TOOL_REGISTRY[fn_name](**fn_args)
+                serialized = json.dumps(tool_result, ensure_ascii=False)
+                output_items.append(
+                    self.create_function_call_output_item(
+                        call_id=call.id,
+                        output=serialized,
+                    )
+                )
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": serialized}
+                )
+
+        # Salvaguarda frente a bucles excesivos de herramientas
+        output_items.append(
+            self.create_text_output_item(
+                text="No se pudo completar la consulta dentro del limite de pasos.",
+                id=f"msg_{uuid.uuid4().hex[:8]}",
+            )
+        )
+        return ResponsesAgentResponse(output=output_items)
+
+    def predict_stream(
+        self, request: ResponsesAgentRequest
+    ) -> Generator[ResponsesAgentStreamEvent, None, None]:
+        # Emision incremental de cada item (tool calls y respuesta final)
+        response = self.predict(request)
+        for item in response.output:
+            yield ResponsesAgentStreamEvent(
+                type="response.output_item.done",
+                item=item,
+            )
+
+# Punto de entrada Models from Code (sin serializacion pickle)
+mlflow.models.set_model(SoporteResponsesAgent())
+\end{lstlisting}
+
+\begin{lstlisting}[style=python, caption={Empaquetado y registro del agente mediante \textit{Models from Code} como \code{LoggedModel} con linaje hacia el Prompt Registry (\code{registrar\_agente.py}).}, label={lst:log-agent-from-code}]
+# Archivo: registrar_agente.py
+import mlflow
+from mlflow.tracking import MlflowClient
+
+mlflow.set_experiment("despliegue-agente-soporte")
+
+# 1. Ejemplo de entrada conforme al contrato OpenAI Responses API
+input_example = {
+    "input": [
+        {
+            "role": "user",
+            "content": "Hola, puedo devolver mi pedido ORD-901 segun vuestra politica?",
+        }
+    ]
+}
+
+# 2. Resolver URI inmutable del prompt vigente para registrar linaje exacto
+prompt_prod = mlflow.genai.load_prompt("prompts:/soporte_cliente@production")
+
+with mlflow.start_run(run_name="log_agente_responses_v3"):
+    model_info = mlflow.pyfunc.log_model(
+        name="agente_soporte",
+        python_model="soporte_agent.py",          # Models from Code: ruta al fuente
+        model_config="agent_config.yaml",         # Configuracion desacoplada
+        input_example=input_example,
+        prompts=[prompt_prod.uri],                # Vincula linaje con Prompt Registry
+        pip_requirements=[
+            "mlflow>=3.1.0",
+            "openai>=1.70.0",
+            "pydantic>=2.10.0",
+        ],
+        registered_model_name="prod_agente_soporte",
+    )
+
+# 3. Asignar alias @staging al modelo registrado para pruebas de integracion
+client = MlflowClient()
+client.set_registered_model_alias(
+    name="prod_agente_soporte",
+    alias="staging",
+    version=model_info.registered_model_version,
+)
+print(f"LoggedModel registrado: {model_info.model_uri}")
+\end{lstlisting}
+
+% ============================================================================
+\section[MLflow AI Gateway]{MLflow AI Gateway: Gobernanza Multi-Proveedor, Seguridad y Control de Costes}\label{sec:ai-gateway}
+% ============================================================================
+
+Cuando una empresa pasa de un único prototipo GenAI a quince aplicaciones internas, cinco \textit{pipelines} de Apache Airflow y decenas de cuadernos de ciencia de datos, permitir que cada componente llame directamente a las APIs externas de OpenAI, Anthropic, Google Gemini o AWS Bedrock genera rápidamente un caos operativo conocido como \textbf{dispersión de acceso a LLMs (\textit{LLM sprawl})}:
+
+\begin{itemize}
+  \item \textbf{Proliferación de secretos:} claves API con altos límites de facturación copiadas en variables de entorno, cuadernos locales y \textit{secrets} duplicados, dificultando la rotación periódica y la revocación ante incidentes.
+  \item \textbf{Gasto opaco (\textit{Shadow AI FinOps}):} imposibilidad de imputar el consumo de \textit{tokens} por equipo, microservicio o caso de uso, ni de imponer cuotas de presupuesto (\textit{rate limiting}) antes de que un bucle defectuoso dispare una factura inesperada.
+  \item \textbf{Acoplamiento a un único proveedor y cero resiliencia:} si un proveedor sufre una degradación regional o error \code{HTTP 429/503}, todos los servicios dependientes caen simultáneamente al carecer de rutas de respaldo (\textit{fallback}) automáticas.
+  \item \textbf{Inconsistencia en seguridad y cumplimiento:} resulta inmanejable garantizar que todas las llamadas apliquen filtros uniformes de anonimización de PII, detección de toxicidad y registro centralizado de auditoría.
+\end{itemize}
+
+El \textbf{MLflow AI Gateway} (integrado de forma nativa en la arquitectura de \pkg{MLflow 3} con almacenamiento persistente de rutas y trazado automático) actúa como plano de control intermedio y \textit{proxy} gobernado entre todos los clientes internos y los proveedores externos o locales. La Figura~\ref{fig:mlflow-ai-gateway} ilustra su arquitectura de referencia.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.55cm and 1.35cm]
+  % Columna izquierda: Clientes internos
+  \node[archbox, text width=2.9cm] (c1) {Microservicios y\\Apps Web};
+  \node[archbox, text width=2.9cm, below=of c1] (c2) {Agentes\\(\texttt{ResponsesAgent})};
+  \node[archbox, text width=2.9cm, below=of c2] (c3) {DAGs de\\Apache Airflow};
+  \node[archbox, text width=2.9cm, below=of c3] (c4) {Notebooks y CI/CD\\de Evaluación};
+
+  % Columna central: Modulos internos del MLflow AI Gateway
+  \node[tealbox, text width=4.0cm, right=1.45cm of c1, yshift=0.35cm] (g1) {Autenticación IAM y\\Secrets Vault Centralizado};
+  \node[tealbox, text width=4.0cm, below=0.32cm of g1] (g2) {Rate Limiting, Cuotas\\y Presupuesto FinOps};
+  \node[darkbox, text width=4.0cm, below=0.32cm of g2] (g3) {Routing Multi-Proveedor,\\Fallbacks y Split A/B};
+  \node[amberbox, text width=4.0cm, below=0.32cm of g3] (g4) {Guardrails Entrada/Salida\\(PII, Toxicidad, Políticas)};
+  \node[subbox, text width=4.0cm, below=0.32cm of g4] (g5) {\textbf{Caché Semántica} + Contabilidad Tokens/Coste + \textbf{Trazado OTel}};
+
+  % Contenedor del AI Gateway (etiqueta de 2 lineas centrada sin tocar los lados)
+  \begin{scope}[on background layer]
+    \node[groupbox, draw=TealAccent, fill=ModernBg!55, fit=(g1) (g2) (g3) (g4) (g5),
+          label={[font=\sffamily\footnotesize\bfseries, text=TealAccent, align=center]above:{MLflow AI Gateway\\[-2pt]{\scriptsize (API unificada compatible OpenAI)}}}] (gwbox) {};
+    \node[groupbox, fit=(c1) (c2) (c3) (c4),
+          label={[font=\sffamily\footnotesize\bfseries, text=PrimaryDark]above:Clientes Internos}] (clbox) {};
+  \end{scope}
+
+  % Columna derecha: Proveedores Cloud y Locales (separacion amplia para etiqueta Datos PII)
+  \node[archbox, text width=3.0cm, right=1.85cm of g1, yshift=-0.1cm] (p1) {OpenAI /\\Azure OpenAI};
+  \node[archbox, text width=3.0cm, below=0.45cm of p1] (p2) {Anthropic\\(Claude)};
+  \node[archbox, text width=3.0cm, below=0.45cm of p2] (p3) {Google Gemini /\\AWS Bedrock};
+  \node[tealbox, text width=3.0cm, below=0.75cm of p3] (p4) {Modelos Locales\\(vLLM / Ollama)};
+
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(p1) (p2) (p3),
+          label={[font=\sffamily\scriptsize\bfseries, text=PrimaryAccent]above:APIs Cloud Gestionadas}] (cloudbox) {};
+    \node[groupbox, draw=EmeraldAccent, fill=SoftBg, fit=(p4),
+          label={[font=\sffamily\scriptsize\bfseries, text=EmeraldAccent]below:Infraestructura Privada}] (locbox) {};
+  \end{scope}
+
+  % Conexiones Clientes -> Gateway
+  \draw[flowarrow] (c1.east) -- (gwbox.west |- c1.east);
+  \draw[flowarrow] (c2.east) -- (gwbox.west |- c2.east);
+  \draw[flowarrow] (c3.east) -- (gwbox.west |- c3.east);
+  \draw[flowarrow] (c4.east) -- (gwbox.west |- c4.east);
+
+  % Conexiones Gateway -> Proveedores
+  \draw[tealarrow] (gwbox.east |- p1.west) -- (p1.west);
+  \draw[tealarrow] (gwbox.east |- p2.west) -- (p2.west);
+  \draw[tealarrow] (gwbox.east |- p3.west) -- (p3.west);
+  \draw[tealarrow] (gwbox.east |- p4.west) -- node[elabel, pos=0.45, above=2pt] {Datos PII} (p4.west);
+\end{tikzpicture}%
+}
+\caption{Arquitectura del MLflow AI Gateway centralizando autenticación, cuotas, enrutamiento con \textit{fallbacks}, \textit{guardrails}, caché semántica, contabilidad FinOps y trazado OTel sobre proveedores externos y locales.}
+\label{fig:mlflow-ai-gateway}
+\end{figure}
+
+El Listado~\ref{lst:gateway-config} ilustra una configuración declarativa de rutas del Gateway combinando balanceo ponderado para pruebas A/B, respaldo automático entre OpenAI y Anthropic y una ruta estrictamente privada servida en \pkg{vLLM} para cargas con datos regulados. A continuación, el Listado~\ref{lst:gateway-client} demuestra cómo cualquier aplicación consume dichas rutas utilizando el SDK estándar de OpenAI sin almacenar ni una sola clave de proveedor en el cliente.
+
+\begin{lstlisting}[style=yaml, caption={Configuración declarativa de rutas del MLflow AI Gateway con control de cuotas, \textit{fallback} multi-proveedor y ruta privada en vLLM (\code{gateway\_config.yaml}).}, label={lst:gateway-config}]
+endpoints:
+  # Ruta principal de produccion con fallback automatico entre proveedores
+  - name: chat-soporte-prod
+    endpoint_type: llm/v1/chat
+    routing_strategy: fallback
+    rate_limit:
+      calls_per_minute: 600
+      tokens_per_minute: 450000
+    models:
+      - provider: openai
+        model_name: gpt-4o-mini-2024-07-18
+        priority: 1
+        config:
+          openai_api_key: $OPENAI_API_KEY
+      - provider: anthropic
+        model_name: claude-3-5-haiku-20241022
+        priority: 2
+        config:
+          anthropic_api_key: $ANTHROPIC_API_KEY
+
+  # Ruta para experimento A/B (80% modelo economico, 20% modelo frontera)
+  - name: chat-soporte-ab
+    endpoint_type: llm/v1/chat
+    routing_strategy: traffic_split
+    models:
+      - provider: openai
+        model_name: gpt-4o-mini-2024-07-18
+        weight: 0.80
+        config:
+          openai_api_key: $OPENAI_API_KEY
+      - provider: openai
+        model_name: gpt-4o-2024-11-20
+        weight: 0.20
+        config:
+          openai_api_key: $OPENAI_API_KEY
+
+  # Ruta privada on-premise (vLLM) para datos sensibles sin salida a Internet
+  - name: chat-datos-regulados
+    endpoint_type: llm/v1/chat
+    models:
+      - provider: openai
+        model_name: Qwen/Qwen2.5-32B-Instruct
+        config:
+          openai_api_base: http://vllm-cluster.internal:8000/v1
+          openai_api_key: $INTERNAL_VLLM_TOKEN
+\end{lstlisting}
+
+\begin{lstlisting}[style=python, caption={Consumo transparente del MLflow AI Gateway desde Python usando el SDK compatible con OpenAI y trazado automático.}, label={lst:gateway-client}]
+import os
+import mlflow
+from openai import OpenAI
+
+# 1. Habilitar trazado automatico hacia el servidor de MLflow
+mlflow.set_tracking_uri("http://mlflow-server.internal:5000")
+mlflow.set_experiment("consumo-via-ai-gateway")
+mlflow.openai.autolog()
+
+# 2. Apuntar el SDK estandar de OpenAI al endpoint unificado del AI Gateway
+# El cliente SOLO posee un token corporativo interno, nunca claves de OpenAI/Anthropic
+gateway_client = OpenAI(
+    base_url="http://mlflow-server.internal:5000/gateway/mlflow/v1",
+    api_key=os.environ["CORP_GATEWAY_TOKEN"],
+)
+
+# 3. Invocar la ruta logica 'chat-soporte-prod' (con fallback y rate limiting activos)
+response = gateway_client.chat.completions.create(
+    model="chat-soporte-prod",
+    temperature=0.0,
+    messages=[
+        {"role": "system", "content": "Resume en dos frases las politicas de garantia."},
+        {"role": "user", "content": "Que cubre la garantia legal en la Union Europea?"},
+    ],
+    extra_headers={
+        "X-MLflow-Team": "equipo-soporte",
+        "X-MLflow-Cost-Center": "CC-4102",
+    },
+)
+print(response.choices[0].message.content)
+\end{lstlisting}
+
+Este desacoplamiento aporta una agilidad arquitectónica extraordinaria: si el equipo de arquitectura decide sustituir \code{gpt-4o-mini} por \code{gemini-2.5-flash} o migrar una carga regulada hacia un modelo abierto en \pkg{vLLM}, basta actualizar la definición de la ruta en el Gateway sin tocar una sola línea de código en los microservicios clientes.
+
+% ============================================================================
+\section[Monitorización y Data Flywheel]{Monitorización Continua en Producción y el \textit{Data Flywheel} de LLMOps}\label{sec:llmops-flywheel}
+% ============================================================================
+
+Desplegar un agente validado detrás de un AI Gateway marca el principio, no el final, de su ciclo de vida. En producción los usuarios formulan preguntas imprevistas, la base documental cambia diariamente y las actualizaciones de los modelos externos alteran sutilmente el estilo y la fidelidad de las respuestas. A diferencia de la monitorización clásica de \textit{data drift} basada en distribuciones estadísticas de columnas numéricas, monitorizar un sistema GenAI exige vigilar continuamente la \textbf{calidad semántica sobre tráfico real} y cerrar el bucle hacia la mejora sistemática del sistema.
+
+\subsection{Evaluación asíncrona en vivo mediante \textit{Scheduled Scorers}}\label{subsec:scheduled-scorers}
+
+Un anti-patrón frecuente al llevar jueces LLM a producción consiste en invocarlos de forma síncrona dentro del camino crítico de la petición HTTP del usuario. Hacerlo añade entre 600\,ms y 1\,500\,ms de latencia percibida y duplica o triplica el coste de inferencia por conversación. En \pkg{MLflow 3}, los \textit{guardrails} rápidos y deterministas (filtros de PII, longitud máxima o listas negras) se ejecutan síncronamente en el AI Gateway, mientras que la evaluación semántica profunda se desacopla de forma asíncrona mediante \textbf{Scheduled Scorers} (\code{ScorerScheduleConfig}).
+
+Un \textit{Scheduled Scorer} opera en segundo plano sobre las trazas productivas ya almacenadas en MLflow: aplica un muestreo estadístico configurable (habitualmente entre el 10\,\% y el 20\,\% del tráfico mediante \code{sample\_rate}, suficiente para estimar tasas de alucinación o seguridad con intervalos de confianza estrechos a una fracción del coste), filtra trazas relevantes con \code{filter\_string}, ejecuta los mismos \textit{scorers} utilizados en desarrollo (\code{Safety}, \code{RetrievalGroundedness}, \code{Guidelines} o jueces \code{make\_judge}) y adjunta las puntuaciones como \code{assessments} sobre las trazas originales, alimentando paneles de alerta y detección temprana de deriva semántica. El Listado~\ref{lst:scheduled-scorers} muestra su configuración.
+
+\begin{lstlisting}[style=python, caption={Configuración de evaluación continua asíncrona en producción mediante \code{ScorerScheduleConfig} con muestreo del 15\,\% de trazas.}, label={lst:scheduled-scorers}]
+from mlflow.genai.scheduled_scorers import (
+    ScorerScheduleConfig,
+    add_scheduled_scorer,
+)
+from mlflow.genai.scorers import (
+    Guidelines,
+    RetrievalGroundedness,
+    Safety,
+)
+
+EXPERIMENT_NAME = "observabilidad-agente-rag"
+
+# 1. Monitor continuo de alucinaciones sobre el 15% del trafico exitoso
+groundedness_monitor = ScorerScheduleConfig(
+    scorer=RetrievalGroundedness(model="openai:/gpt-4o"),
+    scheduled_scorer_name="prod_monitor_groundedness",
+    sample_rate=0.15,
+    filter_string="trace.status = 'OK' AND tags.canal = 'web_chat'",
+)
+
+# 2. Monitor de seguridad sobre el 20% del trafico productivo
+safety_monitor = ScorerScheduleConfig(
+    scorer=Safety(),
+    scheduled_scorer_name="prod_monitor_safety",
+    sample_rate=0.20,
+    filter_string="trace.status = 'OK'",
+)
+
+# 3. Monitor de cumplimiento normativo corporativo (muestreo del 10%)
+policy_monitor = ScorerScheduleConfig(
+    scorer=Guidelines(
+        name="no_promesas_fuera_politica",
+        guidelines=(
+            "El agente nunca debe prometer descuentos, indemnizaciones ni "
+            "plazos de devolucion distintos a los explicitados en las politicas."
+        ),
+        model="openai:/gpt-4o",
+    ),
+    scheduled_scorer_name="prod_monitor_politicas",
+    sample_rate=0.10,
+    filter_string="trace.status = 'OK'",
+)
+
+for cfg in (groundedness_monitor, safety_monitor, policy_monitor):
+    add_scheduled_scorer(experiment_name=EXPERIMENT_NAME, schedule_config=cfg)
+    print(f"Monitor asincrono activado: {cfg.scheduled_scorer_name} (sample={cfg.sample_rate:.0%})")
+\end{lstlisting}
+
+\subsection{Captura de \textit{Human Feedback}, Labeling Sessions y el \textit{Data Flywheel}}\label{subsec:human-feedback-flywheel}
+
+Los jueces automáticos detectan degradaciones a escala, pero la verdadera ventaja competitiva de una organización en LLMOps proviene de capturar sistemáticamente la inteligencia de sus usuarios finales y de sus expertos de dominio. \pkg{MLflow 3} unifica esta captura a través de dos mecanismos enlazados al \code{trace\_id}:
+
+\begin{enumerate}
+  \item \textbf{Feedback en caliente desde la interfaz de producto (\code{mlflow.log\_feedback}):} cuando un usuario pulsa ``pulgar arriba'' o ``pulgar abajo'' o corrige una respuesta en el chat, el \textit{backend} envía de forma asíncrona la señal al servidor MLflow asociándola a la traza exacta que generó aquella respuesta mediante \code{AssessmentSource(source\_type=AssessmentSourceType.HUMAN, ...)}.
+  \item \textbf{Sesiones de etiquetado experto (\textit{Labeling Sessions}):} las trazas que recibieron voto negativo de usuarios o fallaron un \textit{Scheduled Scorer} (por ejemplo \code{RetrievalGroundedness = FAIL}) se enrutan automáticamente a colas de revisión para expertos de dominio (abogados, médicos, agentes senior de soporte). En la interfaz de MLflow, estos expertos inspeccionan la traza completa, anotan el motivo del error y redactan la respuesta esperada ideal (\code{mlflow.log\_expectation}), convirtiendo cada fallo real de producción en un nuevo caso de prueba verificado.
+\end{enumerate}
+
+El Listado~\ref{lst:human-feedback} ilustra cómo registrar tanto la valoración del usuario final como la corrección experta sobre una traza productiva concreta.
+
+\begin{lstlisting}[style=python, caption={Registro de retroalimentación humana y verdad terreno experta vinculadas a trazas de producción con \code{mlflow.log\_feedback} y \code{mlflow.log\_expectation}.}, label={lst:human-feedback}]
+import mlflow
+from mlflow.entities import AssessmentSource, AssessmentSourceType
+
+def registrar_voto_usuario(
+    trace_id: str,
+    user_id: str,
+    thumbs_up: bool,
+    comentario: str = "",
+) -> None:
+    """Invocado desde el endpoint /api/feedback del chat en produccion."""
+    mlflow.log_feedback(
+        trace_id=trace_id,
+        name="user_satisfaction",
+        value=thumbs_up,
+        rationale=comentario or ("Voto positivo" if thumbs_up else "Voto negativo"),
+        source=AssessmentSource(
+            source_type=AssessmentSourceType.HUMAN,
+            source_id=f"user:{user_id}",
+        ),
+    )
+
+def registrar_correccion_experto(
+    trace_id: str,
+    reviewer_email: str,
+    respuesta_correcta: str,
+) -> None:
+    """Registra la verdad terreno curada durante una Labeling Session."""
+    mlflow.log_expectation(
+        trace_id=trace_id,
+        name="expected_response",
+        value=respuesta_correcta,
+        source=AssessmentSource(
+            source_type=AssessmentSourceType.HUMAN,
+            source_id=reviewer_email,
+        ),
+    )
+\end{lstlisting}
+
+Al conectar todos los elementos presentados en los Capítulos~\ref{chap:mlflow-prompting} y~\ref{chap:mlflow-llms} emerge el bucle virtuoso conocido como el \textbf{LLMOps Data Flywheel} (Figura~\ref{fig:llmops-flywheel}): cada fallo detectado en producción por los \textit{Scheduled Scorers} o por el \textit{Human Feedback} pasa por curación experta, enriquece el \textit{Golden Dataset} versionado, dispara un nuevo ciclo de optimización automática de \textit{prompts} (GEPA/DSPy) o ajuste del recuperador RAG, atraviesa la puerta de regresión CI/CD y promociona una versión superior al alias \code{@production} ---haciendo que el sistema mejore de forma acumulativa y medible con cada semana de operación real.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=1.0cm and 1.65cm]
+  % Fila superior (izquierda a derecha)
+  \node[darkbox, text width=3.1cm] (prod) {1. Producción\\[-1pt]{\scriptsize\normalfont \texttt{ResponsesAgent} +\\AI Gateway + Trazas OTel}};
+  \node[tealbox, text width=3.2cm, right=of prod] (mon) {2. Detección Viva\\[-1pt]{\scriptsize\normalfont Scheduled Scorers (15\%)\\+ Human Feedback}};
+  \node[amberbox, text width=3.2cm, right=of mon] (cur) {3. Curación Experta\\[-1pt]{\scriptsize\normalfont Labeling Sessions y\\\texttt{log\_expectation}}};
+
+  % Fila inferior (derecha a izquierda)
+  \node[archbox, text width=3.2cm, below=1.55cm of cur] (gold) {4. Golden Dataset\\[-1pt]{\scriptsize\normalfont Nuevos casos borde\\versionados en MLflow}};
+  \node[tealbox, text width=3.2cm, left=of gold] (opt) {5. Optimización\\[-1pt]{\scriptsize\normalfont GEPA / DSPy + ajuste\\RAG y \textit{reranker}}};
+  \node[archbox, text width=3.1cm, left=of opt] (gate) {6. Puerta CI/CD\\[-1pt]{\scriptsize\normalfont \texttt{mlflow.genai.evaluate}\\+ Promoción \texttt{@production}}};
+
+  % Etiqueta central del volante
+  \node[font=\sffamily\footnotesize\bfseries, text=TealAccent, align=center,
+        fill=ModernBg, draw=TealAccent, dashed, rounded corners=4pt, inner sep=5pt]
+    at ($(mon.south)!0.5!(opt.north)$) {LLMOps Data Flywheel\\[-1pt]{\scriptsize\normalfont Mejora continua guiada por evidencia}};
+
+  % Flechas formando el ciclo cerrado
+  \draw[flowarrow] (prod) -- node[elabel, above=3pt] {Trazas} (mon);
+  \draw[flowarrow] (mon) -- node[elabel, above=3pt] {Fallos} (cur);
+  \draw[flowarrow] (cur) -- node[elabel, right=3pt] {Verdad terreno} (gold);
+  \draw[tealarrow] (gold) -- node[elabel, below=3pt] {Entrenamiento} (opt);
+  \draw[tealarrow] (opt) -- node[elabel, below=3pt] {Candidata vN} (gate);
+  \draw[tealarrow] (gate) -- node[elabel, left=3pt] {Despliegue seguro} (prod);
+\end{tikzpicture}%
+}
+\caption{El \textit{Data Flywheel} de LLMOps en MLflow 3: ciclo cerrado de mejora continua desde el tráfico real y la retroalimentación humana hasta la optimización automática de \textit{prompts} y su promoción gobernada.}
+\label{fig:llmops-flywheel}
+\end{figure}
+
+\begin{warningbox}[Disciplina operativa para evitar la degradación del \textit{Data Flywheel}]
+Para que el volante de datos genere mejoras reales y no ruido acumulado, conviene vigilar tres riesgos habituales: (i) \textbf{sesgo de selección en los votos de usuario} (los usuarios insatisfechos votan con mucha mayor frecuencia que los satisfechos, por lo que la tasa de ``pulgar abajo'' no estima la exactitud global y debe combinarse con muestreo aleatorio mediante \textit{Scheduled Scorers}); (ii) \textbf{envejecimiento del \textit{Golden Dataset}} (las políticas corporativas caducan: una expectativa correcta hace seis meses puede ser hoy errónea si cambió la normativa, por lo que el conjunto dorado requiere revisión trimestral); y (iii) \textbf{control de costes de evaluación} (calibrar la tasa de muestreo \code{sample\_rate} y usar jueces de coste proporcional al riesgo evita que la factura de monitorización supere la de inferencia).
+\end{warningbox}
+
+\begin{infobox}[Puente hacia la integración orquestada con Apache Airflow]
+A lo largo de los Capítulos~\ref{chap:mlflow-prompting} y~\ref{chap:mlflow-llms} hemos construido el ecosistema completo de LLMOps sobre \pkg{MLflow 3}: registro y optimización de \textit{prompts}, trazado OpenTelemetry, evaluación de RAG y agentes, empaquetado mediante \code{ResponsesAgent}, gobernanza con AI Gateway y monitorización continua. Sin embargo, muchas piezas críticas de este volante ---la reindexación incremental de documentos en bases vectoriales, la extracción periódica de trazas fallidas, la ejecución programada de campañas de optimización GEPA y las baterías nocturnas de regresión--- requieren un orquestador robusto con reintentos, dependencias basadas en activos de datos, gestión segura de credenciales y alertas operativas. En el Capítulo~\ref{chap:integracion} integraremos definitivamente ambos pilares del manual diseñando dos arquitecturas productivas completas que combinan \textbf{Apache Airflow} y \textbf{MLflow}: un \textit{pipeline} MLOps tabular con reentrenamiento disparado por deriva y un \textit{pipeline} LLMOps/RAG con reindexación y evaluación automatizada de extremo a extremo.
+\end{infobox}

@@ -1,0 +1,55 @@
+# Entorno minimalista de clase: Apache Airflow 3 + PostgreSQL (Carrefour DW)
+# Solo 2 contenedores: arranque rápido en portátil docente.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: clase-carrefour-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init_carrefour_db.sql:/docker-entrypoint-initdb.d/01_init_carrefour_db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  airflow:
+    image: apache/airflow:3.1.0
+    container_name: clase-carrefour-airflow3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      # --- Núcleo Airflow 3 ---
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      # --- Autenticación simplificada solo para laboratorio local ---
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"
+      AIRFLOW__API_AUTH__JWT_SECRET: "clase-upm-carrefour-jwt-secret-solo-dev-2026"
+      # --- Conector preconfigurado hacia la BD analítica de Carrefour ---
+      AIRFLOW_CONN_CARREFOUR_PG: postgresql://airflow:airflow@postgres:5432/carrefour_dw
+    volumes:
+      - ./dags:/opt/airflow/dags
+    # `airflow standalone` ejecuta db migrate y levanta api-server, scheduler, dag-processor y triggerer
+    command: standalone
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/v2/monitor/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 25s
+
+volumes:
+  pg_data:

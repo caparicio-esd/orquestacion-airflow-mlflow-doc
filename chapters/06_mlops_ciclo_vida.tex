@@ -1,0 +1,913 @@
+% ============================================================================
+% 06_mlops_ciclo_vida.tex — Capítulo 6: Fundamentos de MLOps y Ciclo de Vida ML
+% ============================================================================
+
+\chapter[Fundamentos de MLOps y Ciclo de Vida ML]{Fundamentos de MLOps y el Ciclo de Vida Completo del Machine Learning}\label{chap:mlops-ciclo-vida}
+
+En los capítulos anteriores hemos estudiado cómo orquestar flujos de datos deterministas mediante Apache Airflow: extraer registros de fuentes heterogéneas, transformarlos en capas progresivas de calidad y garantizar entregas puntuales e idempotentes. Sin embargo, cuando el consumidor final de un pipeline de datos deja de ser un cuadro de mando analítico para convertirse en un sistema de aprendizaje automático (\textit{Machine Learning}, ML) en producción, la naturaleza del problema cambia de raíz. Un programa de software tradicional codifica reglas explícitas cuyo comportamiento permanece invariante mientras no cambie el código fuente; un sistema de ML, por el contrario, sintetiza su lógica de decisión a partir de datos empíricos que evolucionan continuamente en el mundo real.
+
+Esta dependencia doble ---de código y de distribuciones estadísticas cambiantes--- invalida el enfoque artesanal basado en cuadernos Jupyter aislados y despliegues manuales. \textbf{MLOps} (\textit{Machine Learning Operations}) nace precisamente como la disciplina de ingeniería encargada de diseñar, automatizar, validar, desplegar y gobernar sistemas de ML de manera fiable, reproducible y sostenible a lo largo de todo su ciclo de vida. En este capítulo analizaremos por qué la mayoría de los proyectos de ML fracasan al pasar del prototipo a producción, desglosaremos las once etapas operativas del ciclo de vida completo, estudiaremos cómo los \textit{Feature Stores} eliminan el sesgo entre entrenamiento y servicio, y formalizaremos los fundamentos matemáticos y arquitectónicos de la detección de deriva (\textit{drift}).
+
+% ============================================================================
+\section[¿Por qué MLOps? Deuda técnica oculta]{¿Por qué MLOps? El malentendido común y la deuda técnica oculta}\label{sec:mlops-deuda-tecnica}
+% ============================================================================
+
+\subsection{La ilusión algorítmica frente a la realidad de producción}
+
+Uno de los malentendidos más extendidos en la industria consiste en reducir MLOps a la tarea puntual de <<desplegar un modelo>>, entendida ingenuamente como serializar un estimador entrenado en un fichero \code{.pkl} o \code{.pt} y envolverlo en un servicio HTTP con Flask o FastAPI. Bajo esta visión simplista, el núcleo casi absoluto del esfuerzo ingenieril reside en el algoritmo de modelado ---elegir arquitecturas, ajustar hiperparámetros y maximizar una métrica sobre un conjunto de datos estático---, mientras que el resto de la infraestructura se percibe como un acompañamiento secundario que puede resolverse en los últimos días del proyecto.
+
+La realidad empírica de los sistemas productivos desmiente frontalmente esta percepción. En su influyente artículo publicado en NeurIPS 2015, \textit{Hidden Technical Debt in Machine Learning Systems}, D.~Sculley y colaboradores (Google) demostraron que en cualquier sistema real de aprendizaje automático \textbf{el código estrictamente dedicado al algoritmo de ML constituye apenas una fracción minúscula ---frecuentemente inferior al 5\%--- del código total del sistema}. Alrededor de ese pequeño núcleo se erige una vasta y compleja infraestructura responsable de la configuración, la recolección de datos, la extracción de características, la verificación de calidad, la gestión de recursos de cómputo, las herramientas de análisis, la orquestación de procesos, la infraestructura de inferencia y la monitorización continua.
+
+La Figura~\ref{fig:mlops-ilusion-realidad} contrapone visualmente ambas perspectivas: el espejismo centrado en el algoritmo (Panel~A) frente a la arquitectura real que exige sostener un modelo en producción durante meses o años (Panel~B).
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  boxblue/.style={
+    rectangle, rounded corners=3pt, draw=PrimaryAccent, line width=0.9pt,
+    fill=SecondaryBlue!85!white, text=white, font=\sffamily\footnotesize\bfseries,
+    align=center, inner sep=4pt, drop shadow={opacity=0.14}
+  },
+  boxml/.style={
+    rectangle, rounded corners=3pt, draw=PrimaryDark, line width=1.1pt,
+    fill=AmberAccent!82!yellow!75!white, text=PrimaryDark, font=\sffamily\bfseries,
+    align=center, inner sep=4pt, drop shadow={opacity=0.16}
+  },
+  paneltitle/.style={
+    font=\sffamily\small\bfseries, text=PrimaryDark, anchor=west
+  }
+]
+  % --------------------------------------------------------------------------
+  % PANEL A: LA ILUSIÓN
+  % --------------------------------------------------------------------------
+  \begin{scope}[shift={(0, 0)}]
+    \node[paneltitle] at (-0.3, 4.9) {Panel A --- La ilusión: visión ingenua centrada en el algoritmo};
+    \draw[LightBorder, rounded corners=6pt, fill=SoftBg, line width=0.8pt]
+      (-0.3, -0.3) rectangle (16.5, 4.55);
+
+    % Caja gigante ML Code en el centro
+    \node[boxml, minimum width=4.6cm, minimum height=3.1cm, font=\sffamily\large\bfseries]
+      (mlA) at (8.1, 2.25) {ML Code};
+
+    % Pequeñas cajas alrededor (fiel a Slide 44)
+    \node[boxblue, minimum width=2.2cm, minimum height=0.62cm, font=\sffamily\scriptsize\bfseries]
+      at (8.1, 4.18) {Data Verification};
+    \node[boxblue, minimum width=2.3cm, minimum height=0.72cm, font=\sffamily\scriptsize\bfseries]
+      at (4.45, 3.35) {Data Collection};
+    \node[boxblue, minimum width=2.3cm, minimum height=0.72cm, font=\sffamily\scriptsize\bfseries]
+      at (4.2, 2.05) {Configuration};
+    \node[boxblue, minimum width=2.0cm, minimum height=0.58cm, font=\sffamily\scriptsize\bfseries]
+      at (4.35, 1.05) {Feature Extraction};
+
+    \node[boxblue, minimum width=2.4cm, minimum height=0.88cm, font=\sffamily\scriptsize\bfseries, text width=2.2cm]
+      at (12.0, 3.55) {Machine Resource\\Management};
+    \node[boxblue, minimum width=2.4cm, minimum height=0.82cm, font=\sffamily\scriptsize\bfseries, text width=2.2cm]
+      at (12.0, 2.30) {Serving\\Infrastructure};
+    \node[boxblue, minimum width=1.9cm, minimum height=0.68cm, font=\sffamily\scriptsize\bfseries]
+      at (11.8, 1.25) {Monitoring};
+
+    \node[boxblue, minimum width=3.1cm, minimum height=0.62cm, font=\sffamily\scriptsize\bfseries]
+      at (7.6, 0.25) {Process Management Tools};
+    \node[boxblue, minimum width=2.7cm, minimum height=0.56cm, font=\sffamily\scriptsize\bfseries]
+      at (11.4, 0.25) {Analysis Tools};
+  \end{scope}
+
+  % --------------------------------------------------------------------------
+  % PANEL B: LA REALIDAD (Sculley et al., NeurIPS 2015)
+  % --------------------------------------------------------------------------
+  \begin{scope}[shift={(0, -6.5)}]
+    \node[paneltitle] at (-0.3, 5.25) {Panel B --- La realidad productiva: deuda técnica oculta (Sculley et al., Google, 2015)};
+    \draw[LightBorder, rounded corners=6pt, fill=SoftBg, line width=0.8pt]
+      (-0.3, -0.3) rectangle (16.5, 4.9);
+
+    % Columna 1: Configuration (bloque alto a la izquierda)
+    \node[boxblue, minimum width=2.45cm, minimum height=3.3cm, text width=2.2cm]
+      at (1.2, 2.45) {Configuration};
+
+    % Columna 2 superior: Data Collection
+    \node[boxblue, minimum width=2.85cm, minimum height=2.25cm, text width=2.6cm]
+      at (4.08, 2.95) {Data Collection};
+
+    % Fila inferior izq-centro: Feature Extraction
+    \node[boxblue, minimum width=3.7cm, minimum height=1.55cm, text width=3.4cm]
+      at (4.7, 0.8) {Feature Extraction};
+
+    % Columna 3 superior: Data Verification
+    \node[boxblue, minimum width=2.25cm, minimum height=2.15cm, text width=2.0cm]
+      at (6.85, 3.25) {Data\\Verification};
+
+    % Diminuta caja ML Code en el centro (fiel a Slide 45)
+    \node[boxml, minimum width=1.25cm, minimum height=0.62cm, font=\sffamily\scriptsize\bfseries]
+      at (6.35, 1.8) {ML Code};
+
+    % Columna 4 superior: Machine Resource Management
+    \node[boxblue, minimum width=2.6cm, minimum height=2.0cm, text width=2.4cm]
+      at (9.5, 3.25) {Machine\\Resource\\Management};
+
+    % Columna 3-4 media: Analysis Tools
+    \node[boxblue, minimum width=3.65cm, minimum height=0.72cm, text width=3.4cm]
+      at (9.05, 1.75) {Analysis Tools};
+
+    % Columna 3-4 inferior: Process Management Tools
+    \node[boxblue, minimum width=3.45cm, minimum height=1.28cm, text width=3.2cm]
+      at (8.95, 0.65) {Process Management\\Tools};
+
+    % Columna 5: Serving Infrastructure (muy alta)
+    \node[boxblue, minimum width=2.6cm, minimum height=4.55cm, text width=2.4cm]
+      at (12.45, 2.3) {Serving\\Infrastructure};
+
+    % Columna 6: Monitoring
+    \node[boxblue, minimum width=2.1cm, minimum height=2.4cm, text width=1.9cm]
+      at (15.05, 3.1) {Monitoring};
+  \end{scope}
+\end{tikzpicture}%
+}
+\caption{Contraste entre la visión ingenua del aprendizaje automático en producción (Panel~A) y la distribución real de complejidad e infraestructura descrita por Sculley et al.\ (Panel~B). La superficie de cada bloque representa cualitativamente el esfuerzo de desarrollo, mantenimiento y deuda técnica operativa.}
+\label{fig:mlops-ilusion-realidad}
+\end{figure}
+
+Comprender esta asimetría transforma las prioridades de arquitectura. Un modelo en producción no es un binario inmutable que se instala una vez y funciona indefinidamente: los esquemas de entrada mutan, los patrones de comportamiento del usuario se desplazan, las reglas regulatorias cambian y el rendimiento predictivo se erosiona de forma silenciosa. Por consiguiente, construir un sistema de ML resiliente exige desplazar el foco desde el \textit{entrenamiento puntual} hacia la \textit{fábrica automatizada de modelos}, capaz de ingestar datos nuevos, validar hipótesis, reentrenar, auditar, desplegar y monitorizar de manera continua.
+
+\subsection{La intersección de tres mundos y los niveles de madurez MLOps}
+
+MLOps no es una herramienta concreta ni el nombre de un perfil individual, sino el punto de convergencia operativa de tres disciplinas que tradicionalmente trabajaban en silos separados:
+
+\begin{itemize}
+  \item \textbf{Desarrollo de Machine Learning (\textit{Data Science} / Investigación aplicada):} formulación del problema, análisis exploratorio, selección de arquitecturas, diseño de características, evaluación estadística rigurosa y alineación con objetivos de negocio.
+  \item \textbf{Ingeniería de Datos (\textit{Data Engineering}):} construcción de pipelines fiables de ingesta y transformación, gobierno del linaje, contratos de datos, almacenamiento escalable (\textit{Data Lakes}, \textit{Lakehouses}, \textit{Feature Stores}) y aseguramiento continuo de calidad.
+  \item \textbf{Operaciones e Ingeniería de Fiabilidad (\textit{DevOps / SRE}):} integración y despliegue continuos (CI/CD), contenerización, orquestación de cómputo (Kubernetes, aceleradores GPU), escalado elástico, observabilidad, seguridad, cumplimiento normativo y gestión de incidentes.
+\end{itemize}
+
+Las organizaciones no alcanzan una madurez plena en esta intersección de un día para otro. Siguiendo la taxonomía de referencia popularizada por Google Cloud y adoptada ampliamente en la industria, es útil clasificar la evolución de un equipo de ML en tres niveles progresivos de madurez, sintetizados en la Tabla~\ref{tab:mlops-madurez}.
+
+\begin{table}[htbp]
+\centering
+\caption{Taxonomía de niveles de madurez MLOps y sus características arquitectónicas.}
+\label{tab:mlops-madurez}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.7cm} Y Y Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Dimensión} &
+\textcolor{white}{\sffamily\bfseries Nivel 0: Proceso manual} &
+\textcolor{white}{\sffamily\bfseries Nivel 1: Automatización ML (CT)} &
+\textcolor{white}{\sffamily\bfseries Nivel 2: CI/CD/CT completo} \\
+\midrule
+Artefacto entregado a producción &
+Modelo entrenado de forma manual (fichero serializado o imagen puntual). &
+Pipeline completo de entrenamiento y validación automatizado (DAG). &
+Código del pipeline y componentes versionados que se compilan, prueban y despliegan automáticamente. \\
+\rowcolor{TableStripe}
+Frecuencia de reentrenamiento &
+Esporádica (meses o ante quejas del negocio); scripts ad-hoc. &
+Periódica o disparada por eventos de \textit{drift} y llegada de nuevos datos (\textit{Continuous Training}). &
+Continua: reentrenamiento por datos (CT) más despliegue ágil de nuevas arquitecturas y features (CI/CD). \\
+Validación de datos y modelos &
+Inspección manual en cuadernos Jupyter; sin \textit{quality gates}. &
+\textit{Gates} automáticos dentro del pipeline antes de registrar o servir. &
+Pirámide completa de pruebas (código, datos, modelo, sesgo y latencia) en cada \textit{pull request}. \\
+\rowcolor{TableStripe}
+Gestión de features y modelos &
+Sin Feature Store ni Model Registry; riesgo severo de \textit{skew}. &
+Tracking centralizado, Model Registry y almacén de metadatos; Feature Store opcional o inicial. &
+Feature Store dual (offline/online), Model Registry con alias y trazabilidad de extremo a extremo. \\
+Monitorización y gobierno &
+Solo métricas básicas de infraestructura (CPU, errores HTTP 5xx). &
+Monitorización de deriva de datos y degradación con alertas conectadas al orquestador. &
+Observabilidad integral (negocio, sistema, datos), despliegues progresivos (Canary/Shadow) y \textit{rollback} automático. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Deuda técnica específica de los sistemas de Machine Learning}
+
+Además de la deuda técnica convencional del software (código mal estructurado, falta de pruebas o dependencias obsoletas), los sistemas de ML acumulan formas sutiles de deuda derivadas de la erosión de las fronteras de abstracción. Ignorarlas conduce a sistemas frágiles cuyo coste de mantenimiento crece exponencialmente:
+
+\begin{description}
+  \item[Principio CACE (\textit{Changing Anything Changes Everything}) y entrelazamiento de señales]
+  En ingeniería de software clásica podemos refactorizar un módulo manteniendo su interfaz sin alterar los módulos adyacentes. En ML, todas las variables de entrada se combinan conjuntamente dentro de la función de pérdida: modificar la distribución, la escala o la disponibilidad de una única característica $x_k$ altera los pesos óptimos del resto de características $x_j$ ($j \neq k$), modifica la calibración de probabilidades y desplaza los umbrales óptimos de decisión. Lo mismo sucede al cambiar un hiperparámetro, la tasa de muestreo o el criterio de filtrado de datos. Cuando además un modelo secundario consume las predicciones de un modelo primario para corregir errores en un subdominio (\textit{correction cascades}), se genera un acoplamiento opaco donde mejorar el modelo base puede empeorar el rendimiento agregado del sistema.
+
+  \item[Bucles de retroalimentación ocultos (\textit{Hidden Feedback Loops})]
+  Los sistemas en producción influyen sobre el mundo que observan. En un \textbf{bucle directo}, un motor de recomendación decide qué productos se muestran al usuario; únicamente los productos recomendados reciben clics, y esos clics pasan a formar el conjunto de entrenamiento de la siguiente versión, amplificando sesgos de exposición y reduciendo la diversidad. En un \textbf{bucle indirecto}, dos sistemas aparentemente independientes interactúan a través del entorno compartido: por ejemplo, un modelo de precios dinámicos y un modelo de predicción de demanda operados por equipos distintos pueden desestabilizarse mutuamente en oscilaciones no previstas si cada uno se reentrena asumiendo que el otro permanece estático.
+
+  \item[\textit{Pipeline Jungles} y código pegamento (\textit{Glue Code})]
+  Cuando la preparación de datos evoluciona orgánicamente añadiendo nuevas fuentes mediante scripts encadenados, extracciones parciales, ficheros intermedios sin contrato y cruces manuales, emerge una <<jungla de pipelines>>. Cualquier cambio menor exige inspeccionar decenas de pasos intermedios y resulta casi imposible reproducir un dataset histórico. De forma análoga, el exceso de código pegamento diseñado para adaptar datos a una librería específica atrapa al equipo en decisiones tecnológicas prematuras y encarece enormemente probar familias de modelos alternativas.
+
+  \item[\textit{Dead Experimental Codepaths} y deuda de configuración]
+  Durante la experimentación rápida es tentador introducir banderas condicionales (\code{if use\_v2\_normalizer: ...}) para probar variantes en producción. Con el paso del tiempo se acumulan ramas muertas que nadie se atreve a eliminar por temor a romper una configuración heredada ---recordando incidentes célebres como la pérdida millonaria de Knight Capital por código latente reactivado---. Igualmente, los ficheros de configuración extensos y poco validados (rutas de datos, rangos de fechas, listas de exclusión de columnas) se convierten en una fuente frecuente de errores silenciosos que no disparan excepciones sintácticas.
+\end{description}
+
+\begin{infobox}[Invariante fundamental de reproducibilidad en MLOps]
+En el desarrollo de software determinista, un artefacto compilado es función del código fuente y de su entorno de compilación: $A = f(C, E)$. En un sistema de Machine Learning, la reproducibilidad exige versionar simultáneamente la cuádrupla completa:
+\[
+\mathcal{M} = \Phi(C,\; D,\; H,\; E)
+\]
+donde $C$ es el \textit{commit} exacto del código (preprocesamiento y entrenamiento), $D$ es el \textit{snapshot} inmutable o huella criptográfica del conjunto de datos, $H$ agrupa hiperparámetros, semillas aleatorias y configuración, y $E$ captura el entorno completo (versión de Python, librerías nativas, CUDA y hardware). Si falta cualquiera de los cuatro ejes, el experimento es irreproducible y no auditable.
+\end{infobox}
+
+% ============================================================================
+\section[El ciclo de vida del ML en once etapas]{El ciclo de vida completo del Machine Learning en once etapas}\label{sec:mlops-ciclo-11-etapas}
+% ============================================================================
+
+Un sistema de ML maduro se articula en cuatro macro-fases conceptuales ---\textit{Carga de datos}, \textit{Preprocesamiento}, \textit{Aprendizaje del modelo} y \textit{Servicio del modelo}--- que en la práctica ingenieril se despliegan en \textbf{once etapas operativas} conectadas por un bucle cerrado de retroalimentación continua. La Figura~\ref{fig:mlops-ciclo-11-etapas} ilustra esta arquitectura integral, mostrando tanto la vista macroscópica superior como su despliegue operativo detallado con las rutas de realimentación desde la monitorización hacia la ingesta y el reentrenamiento automático.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  macrobox/.style={
+    rectangle, rounded corners=3pt, minimum width=3.1cm, minimum height=0.95cm,
+    text=white, font=\sffamily\footnotesize\bfseries, align=center,
+    drop shadow={opacity=0.14}
+  },
+  banner/.style={
+    rectangle, rounded corners=2pt, minimum height=0.52cm,
+    text=white, font=\sffamily\scriptsize\bfseries, align=center
+  },
+  stagebox/.style={
+    rectangle, rounded corners=3pt, draw=SecondaryBlue, line width=1.1pt,
+    fill=white, text=PrimaryDark, font=\sffamily\scriptsize\bfseries,
+    minimum width=3.0cm, minimum height=1.05cm, text width=2.75cm,
+    align=center, drop shadow={opacity=0.08}
+  },
+  stagefill/.style={
+    rectangle, rounded corners=3pt, draw=PrimaryAccent, line width=1.1pt,
+    fill=SecondaryBlue!14!white, text=PrimaryDark, font=\sffamily\scriptsize\bfseries,
+    minimum width=3.0cm, minimum height=1.05cm, text width=2.75cm,
+    align=center, drop shadow={opacity=0.08}
+  },
+  stagenum/.style={
+    circle, fill=PrimaryDark, text=white, font=\sffamily\tiny\bfseries,
+    inner sep=1.5pt, minimum size=0.42cm
+  }
+]
+  % --------------------------------------------------------------------------
+  % FILA SUPERIOR: 4 MACRO-FASES
+  % --------------------------------------------------------------------------
+  \node[macrobox, fill=SecondaryBlue] (m1) at (2.0, 9.2) {1. Data Loading\\{\scriptsize Carga de datos}};
+  \node[macrobox, fill=SecondaryBlue!72!TealAccent] (m2) at (6.2, 9.2) {2. Preprocessing\\{\scriptsize Preprocesamiento}};
+  \node[macrobox, fill=PrimaryAccent] (m3) at (10.4, 9.2) {3. Model Learning\\{\scriptsize Aprendizaje}};
+  \node[macrobox, fill=PrimaryDark] (m4) at (14.6, 9.2) {4. Model Serving\\{\scriptsize API e Inferencia}};
+
+  \draw[flowarrow, line width=1.4pt, color=PrimaryDark] (m1) -- (m2);
+  \draw[flowarrow, line width=1.4pt, color=PrimaryDark] (m2) -- (m3);
+  \draw[flowarrow, line width=1.4pt, color=PrimaryDark] (m3) -- (m4);
+
+  % Separador horizontal
+  \draw[LightBorder, line width=1pt] (0.1, 8.25) -- (16.5, 8.25);
+
+  % --------------------------------------------------------------------------
+  % FILA 1 DEL DESPLIEGUE: Etapa 1 + Etapas 2, 3, 4 (Preprocessing)
+  % --------------------------------------------------------------------------
+  \node[banner, fill=SecondaryBlue!72!TealAccent, minimum width=11.4cm]
+    (b_prep1) at (10.4, 7.55) {Macro-fase 2: Preprocessing (Etapas 2--4)};
+
+  \node[stagefill] (s1) at (2.0, 6.45) {Carga de datos\\{\normalfont\tiny Ingesta, linaje, contratos}};
+  \node[stagebox]  (s2) at (6.2, 6.45) {Análisis exploratorio\\{\normalfont\tiny EDA, nulos, colinealidad}};
+  \node[stagebox]  (s3) at (10.4, 6.45) {Transformación y FE\\{\normalfont\tiny Pipelines reutilizables}};
+  \node[stagebox]  (s4) at (14.6, 6.45) {Validación de datos\\{\normalfont\tiny Quality gate continuo}};
+
+  \node[stagenum] at (s1.north west) {1};
+  \node[stagenum] at (s2.north west) {2};
+  \node[stagenum] at (s3.north west) {3};
+  \node[stagenum] at (s4.north west) {4};
+
+  \draw[flowarrow, line width=1.1pt] (s1) -- (s2);
+  \draw[dashedarrow, line width=1.1pt] (s2) -- (s3);
+  \draw[dashedarrow, line width=1.1pt] (s3) -- (s4);
+
+  % --------------------------------------------------------------------------
+  % FILA 2 DEL DESPLIEGUE: Etapa 5 (Preprocessing cont.) + Etapas 6, 7, 8 (Model Learning)
+  % --------------------------------------------------------------------------
+  \node[banner, fill=SecondaryBlue!72!TealAccent, minimum width=3.0cm]
+    (b_prep2) at (2.0, 5.05) {Preprocessing (cont.)};
+  \node[banner, fill=PrimaryAccent, minimum width=11.4cm]
+    (b_learn) at (10.4, 5.05) {Macro-fase 3: Model Learning (Etapas 6--8)};
+
+  \node[stagebox] (s5) at (2.0, 3.95) {División Train/Val/Test\\{\normalfont\tiny Temporal, grupos, sin fuga}};
+  \node[stagebox] (s6) at (6.2, 3.95) {Construcción del modelo\\{\normalfont\tiny Baseline, HPO, regularización}};
+  \node[stagebox] (s7) at (10.4, 3.95) {Validación del modelo\\{\normalfont\tiny KPIs, slices, calibración}};
+  \node[stagebox] (s8) at (14.6, 3.95) {Entrenamiento a escala\\{\normalfont\tiny DDP, Ray, FP16/BF16}};
+
+  \node[stagenum] at (s5.north west) {5};
+  \node[stagenum] at (s6.north west) {6};
+  \node[stagenum] at (s7.north west) {7};
+  \node[stagenum] at (s8.north west) {8};
+
+  % Conector de fila 1 a fila 2
+  \draw[dashedarrow, line width=1pt] (s4.east) -- ++(0.35, 0) -- ++(0, -1.00) -| (0.2, 3.95) -- (s5.west);
+  \draw[dashedarrow, line width=1.1pt] (s5) -- (s6);
+  \draw[dashedarrow, line width=1.1pt] (s6) -- (s7);
+  \draw[dashedarrow, line width=1.1pt] (s7) -- (s8);
+
+  % --------------------------------------------------------------------------
+  % FILA 3 DEL DESPLIEGUE: Etapas 9, 10, 11 (Model Serving)
+  % --------------------------------------------------------------------------
+  \node[banner, fill=PrimaryDark, minimum width=15.6cm]
+    (b_serv) at (8.3, 2.05) {Macro-fase 4: Model Serving y Operación Continua (Etapas 9--11)};
+
+  \node[stagebox] (s9)  at (2.0, 0.95) {Despliegue (Roll-out)\\{\normalfont\tiny Registry, Canary, CI/CD}};
+  \node[stagebox] (s10) at (6.2, 0.95) {Servicio (Serving)\\{\normalfont\tiny REST, Batch, Stream, ONNX}};
+  \node[stagebox, draw=TealAccent, fill=ModernBg, minimum width=7.2cm, text width=6.8cm]
+    (s11) at (12.5, 0.95) {Monitorización y Logging continuo\\{\normalfont\tiny Negocio/Calidad + Sistema (p95/p99) + Drift (PSI/KS) + Auditoría}};
+
+  \node[stagenum, fill=TealAccent] at (s11.north west) {11};
+  \node[stagenum] at (s9.north west) {9};
+  \node[stagenum] at (s10.north west) {10};
+
+  % Conector de fila 2 a fila 3 (pasa limpio por el corredor sin chocar)
+  \draw[dashedarrow, line width=1pt] (s8.east) -- ++(0.35, 0) -- ++(0, -1.35) -| (0.2, 0.95) -- (s9.west);
+  \draw[dashedarrow, line width=1.1pt] (s9) -- (s10);
+  \draw[dashedarrow, line width=1.1pt] (s10) -- (s11);
+
+  % --------------------------------------------------------------------------
+  % BUCLE DE RETROALIMENTACIÓN CONTINUA (CT / Feedback Loop)
+  % --------------------------------------------------------------------------
+  \draw[tealarrow, line width=1.3pt]
+    (s11.south) -- ++(0, -0.75) -| (-0.45, 6.45) -- (s1.west);
+  \node[elabel, text=TealAccent, font=\sffamily\scriptsize\bfseries]
+    at (6.0, -0.35) {Bucle de realimentación: nuevos datos etiquetados, auditoría y captura de ground truth};
+
+  % Flecha ámbar de drift -> reentrenamiento rodeando por la derecha sin cruzar el banner
+  \draw[-{Stealth[length=6pt, width=4.5pt]}, line width=1.2pt, color=AmberAccent, dashed]
+    (s11.east) -- ++(0.65, 0) |- (11.5, 2.95) -| (s6.south);
+  \node[elabel, text=AmberAccent, font=\sffamily\tiny\bfseries]
+    at (11.5, 2.95) {Alerta de drift $\rightarrow$ Reentrenamiento automático (CT)};
+\end{tikzpicture}%
+}
+\caption{Ciclo de vida completo del Machine Learning: correspondencia entre las cuatro macro-fases y las once etapas operativas, incluyendo el bucle de realimentación continua desde la monitorización hacia la ingesta de nuevos datos y el disparo del reentrenamiento automático.}
+\label{fig:mlops-ciclo-11-etapas}
+\end{figure}
+
+A continuación desarrollamos en profundidad las decisiones de ingeniería, herramientas estándar y salvaguardas necesarias en cada una de las once etapas.
+
+% ----------------------------------------------------------------------------
+\subsection{Macro-fase 1: Carga de datos (Etapa 1)}
+% ----------------------------------------------------------------------------
+
+\subsubsection{Etapa 1: Ingesta, linaje y \textit{Data Contracts}}
+
+Todo pipeline de aprendizaje automático hereda los defectos de sus fuentes originales bajo la máxima \textit{garbage in, garbage out}. La ingesta de datos crudos ---provenientes de bases de datos transaccionales OLTP, almacenes analíticos, APIs externas, ficheros Parquet/Avro en \textit{Data Lakes} o tópicos Kafka--- debe ser automatizada, parametrizada por ventana temporal e idempotente mediante un orquestador como Airflow (véanse los Capítulos~3 y~5).
+
+Más allá del movimiento físico de bytes, una ingesta madura incorpora tres mecanismos de gobierno:
+\begin{enumerate}
+  \item \textbf{Linaje de datos (\textit{Data Lineage}):} registrar de manera automática qué tablas, particiones y versiones de código produjeron cada \textit{snapshot} de entrenamiento (por ejemplo, mediante eventos OpenLineage o tablas Delta/Iceberg con \textit{time travel}). Sin linaje es imposible auditar por qué un modelo desplegado el mes pasado tomó una decisión concreta ni cumplir con auditorías regulatorias.
+  \item \textbf{Versionado inmutable de \textit{snapshots}:} nunca entrenar directamente contra tablas mutables que se sobrescriben a diario; congelar o referenciar el identificador de \textit{snapshot} (\code{snapshot\_id}) o manifiesto DVC/LakeFS.
+  \item \textbf{Contratos de datos (\textit{Data Contracts}):} acuerdos formales y verificables por máquina entre el equipo productor del dato (p.~ej., el equipo de pagos) y el equipo consumidor de ML. Un contrato de datos especifica el \textbf{esquema} (nombres, tipos, nulabilidad y codificaciones), la \textbf{semántica de negocio} (p.~ej., si \code{importe} incluye IVA y en qué divisa), los \textbf{SLAs de frescura y completitud} (p.~ej., partición disponible antes de las 02:00~UTC con menos del 0.5\% de nulos) y la \textbf{política de evolución} (cambios retrocompatibles frente a deprecaciones avisadas). Ante un cambio de esquema aguas arriba, el contrato rompe el despliegue del productor en CI en lugar de corromper silenciosamente el modelo aguas abajo.
+\end{enumerate}
+
+% ----------------------------------------------------------------------------
+\subsection{Macro-fase 2: Preprocesamiento y preparación (Etapas 2 a 5)}
+% ----------------------------------------------------------------------------
+
+\subsubsection{Etapa 2: Análisis Exploratorio de Datos (EDA)}
+
+Antes de escribir la primera línea de entrenamiento, el EDA permite caracterizar la geometría estadística del problema mediante estadísticos de orden, histogramas, gráficos de cuantiles, diagramas de caja y matrices de correlación (Pearson para relaciones lineales y Spearman o información mutua para dependencias monótonas y no lineales). Desde una perspectiva ingenieril, el EDA busca detectar tempranamente tres patologías críticas:
+
+\begin{itemize}
+  \item \textbf{Desbalanceo severo de clases:} en detección de fraude, mantenimiento predictivo o diagnóstico médico, la clase positiva representa frecuentemente entre el 0.01\% y el 1\% de los registros. Identificarlo en el EDA determina tanto la estrategia de particionado (estratificación) como la elección de métricas (PR-AUC en lugar de \textit{accuracy}) y la función de pérdida (ponderación de clases o \textit{focal loss}).
+  \item \textbf{Colinealidad y redundancia:} variables fuertemente correlacionadas inflan la varianza de los coeficientes en modelos lineales (detectable mediante el Factor de Inflación de la Varianza, $\text{VIF}_j = 1 / (1 - R_j^2)$, donde valores superiores a 5--10 exigen atención) y diluyen la atribución de importancia en árboles y explicaciones SHAP.
+  \item \textbf{Mecanismo generador de valores ausentes:} siguiendo la taxonomía clásica de Rubin, resulta crucial distinguir si los nulos son \textbf{MCAR} (\textit{Missing Completely At Random}, p.~ej.\ caída aleatoria de un sensor), \textbf{MAR} (\textit{Missing At Random}, la ausencia depende de otra variable observada, como ingresos no declarados más frecuentes en ciertos segmentos de edad) o \textbf{MNAR} (\textit{Missing Not At Random}, la ausencia depende del propio valor oculto, como clientes con morosidad extrema que omiten declarar deudas). En escenarios MNAR, imputar mecánicamente por la media destruye información valiosa; suele ser imprescindible añadir una variable indicadora binaria de ausencia (\code{missing\_flag}) junto con la imputación.
+\end{itemize}
+
+Las conclusiones del EDA deben materializarse en informes versionados y trazables (no en capturas de pantalla efímeras), ya que justifican las decisiones posteriores de transformación y constituyen la línea base estadística frente a la cual se vigilará el \textit{drift}.
+
+\subsubsection{Etapa 3: Transformación y \textit{Feature Engineering} encapsulado}
+
+Esta etapa limpia, normaliza y enriquece el conjunto de datos crudo para maximizar la señal predictiva: tratamiento de valores faltantes, manejo de valores atípicos (\textit{winsorization}, transformaciones logarítmicas o de Yeo-Johnson), codificación de variables categóricas (\textit{One-Hot Encoding} para baja cardinalidad, \textit{Target Encoding} regularizado y calculado \textit{out-of-fold} para alta cardinalidad, \textit{hashing} o \textit{embeddings} aprendidos), escalado robusto (\code{StandardScaler}, \code{RobustScaler}) y creación de variables derivadas de dominio (ratios financieros, ventanas móviles temporales, interacciones no lineales y codificación cíclica seno/coseno para horas o meses).
+
+La regla de oro de ingeniería en esta etapa es la \textbf{encapsulación estricta}: ninguna transformación con estado (medias, desviaciones típicas, diccionarios de categorías, cuantiles) puede quedar suelta en celdas de un cuaderno. Agrupar toda la lógica dentro de objetos compuestos como \code{sklearn.pipeline.Pipeline} y \code{ColumnTransformer} garantiza dos propiedades esenciales:
+\begin{enumerate}
+  \item \textbf{Prevención de fuga en validación cruzada:} los parámetros de escalado o imputación se ajustan (\code{fit}) exclusivamente sobre cada pliegue de entrenamiento y se aplican (\code{transform}) sobre validación.
+  \item \textbf{Consistencia en inferencia:} al serializar el pipeline completo como un único artefacto (p.~ej.\ mediante MLflow Models), las solicitudes en producción reciben exactamente la misma secuencia determinista de transformaciones que los datos de entrenamiento.
+\end{enumerate}
+
+\subsubsection{Etapa 4: Validación de datos continua como \textit{quality gate} automático}
+
+La validación de datos no es una comprobación puntual durante la exploración inicial, sino una \textbf{barrera automática (\textit{quality gate})} que se ejecuta en cada corrida del pipeline de entrenamiento e inferencia \textit{batch}. Su cometido es certificar el cumplimiento del esquema (tipos exactos, rangos numéricos, cardinalidad de categorías, ausencia de infinitos o \code{NaN} inesperados) y verificar invariantes de negocio (p.~ej., \code{fecha\_cierre >= fecha\_apertura} o que la suma de porcentajes de cartera no supere 100\%).
+
+En el ecosistema Python destacan dos estándares complementarios: \pkg{Great Expectations} (orientado a suites declarativas ricas, documentación HTML automática y múltiples motores como Spark y SQL) y \pkg{Pandera} (integración nativa y ligera con Pandas, Polars y PySpark mediante esquemas tipados inspirados en Pydantic). El Listado~\ref{lst:pandera-quality-gate} ilustra un \textit{quality gate} declarativo con Pandera listo para bloquear un DAG de entrenamiento cuando los datos infringen el contrato.
+
+\begin{lstlisting}[style=python, caption={Quality gate declarativo con Pandera para validar esquemas, distribuciones e invariantes de negocio antes del entrenamiento.}, label={lst:pandera-quality-gate}]
+import logging
+import pandas as pd
+import pandera as pa
+from pandera.typing import Series
+
+logger = logging.getLogger(__name__)
+
+
+class ContratoTransaccionesML(pa.DataFrameModel):
+    """Contrato estricto de datos de entrada para el modelo de fraude."""
+
+    transaction_id: Series[str] = pa.Field(unique=True, nullable=False)
+    edad_cliente: Series[int] = pa.Field(ge=18, le=110, nullable=False)
+    importe_eur: Series[float] = pa.Field(gt=0.0, le=250_000.0, nullable=False)
+    canal: Series[str] = pa.Field(isin=["web", "app", "tpv", "cajero"])
+    ratio_importe_media_30d: Series[float] = pa.Field(ge=0.0, nullable=True)
+    es_fraude: Series[int] = pa.Field(isin=[0, 1], nullable=False)
+
+    @pa.check("ratio_importe_media_30d", name="porcentaje_nulos_acotado")
+    def validar_proporcion_nulos(cls, serie: Series[float]) -> bool:
+        # Impide degradacion silenciosa por caida del upstream de agregaciones
+        return float(serie.isna().mean()) <= 0.05
+
+    @pa.dataframe_check(name="prevalencia_fraude_en_rango")
+    def validar_prevalencia_objetivo(cls, df: pd.DataFrame) -> bool:
+        tasa = float(df["es_fraude"].mean())
+        return 0.001 <= tasa <= 0.15
+
+    class Config:
+        strict = True   # Rechaza columnas no declaradas en el contrato
+        coerce = False  # No fuerza conversiones silenciosas de tipo
+
+
+def ejecutar_quality_gate(df: pd.DataFrame) -> pd.DataFrame:
+    """Valida el lote en modo lazy para reportar todos los fallos juntos."""
+    try:
+        validated_df = ContratoTransaccionesML.validate(df, lazy=True)
+        logger.info("Quality gate superado: %d registros conformes.", len(validated_df))
+        return validated_df
+    except pa.errors.SchemaErrors as exc:
+        resumen = exc.failure_cases[["check", "column", "failure_case"]].head(10)
+        logger.error("Quality gate fallido (%d infracciones):\n%s", len(exc.failure_cases), resumen)
+        raise RuntimeError("Entrenamiento abortado por violacion del contrato de datos.") from exc
+\end{lstlisting}
+
+\subsubsection{Etapa 5: División \textit{Train/Val/Test} y erradicación del \textit{Data Leakage}}
+
+El particionado riguroso separa tres propósitos estadísticamente incompatibles: el conjunto de \textbf{entrenamiento} (\textit{train}) ajusta los parámetros del modelo; el conjunto de \textbf{validación} (\textit{validation}) guía la selección de arquitectura, hiperparámetros y umbral de decisión; y el conjunto de \textbf{prueba} (\textit{test}) permanece estrictamente sellado hasta el final para ofrecer una estimación insesgada del error de generalización.
+
+En datasets tabulares moderados son habituales proporciones de 70/15/15 o 80/10/10; en volúmenes masivos (millones de registros), asignar un 1--2\% a validación y prueba suele bastar para obtener intervalos de confianza estrechos, reservando el 96--98\% para entrenamiento. Sin embargo, \textbf{la estrategia de muestreo importa mucho más que la proporción}:
+
+\begin{itemize}
+  \item \textbf{División aleatoria estratificada (\code{StratifiedShuffleSplit} / \code{StratifiedKFold}):} válida solo cuando las observaciones son independientes e idénticamente distribuidas (i.i.d.). Preserva la proporción exacta de clases en cada partición, indispensable con clases desbalanceadas.
+  \item \textbf{División temporal (\textit{Walk-Forward} / \textit{Expanding Window} y \textit{Rolling Window}):} obligatoria en series temporales y datos secuenciales (demanda, fraude, abandono). Nunca se permite barajar aleatoriamente el tiempo: cada pliegue de validación debe ocurrir estrictamente \textit{después} del intervalo de entrenamiento, dejando además una ventana de seguridad (\textit{embargo} o \textit{gap}) cuando las etiquetas tardan días en confirmarse.
+  \item \textbf{División por grupos (\code{GroupKFold} / \code{StratifiedGroupKFold}):} indispensable cuando múltiples filas pertenecen a una misma entidad (múltiples radiografías del mismo paciente, múltiples sesiones del mismo usuario o múltiples transacciones del mismo comercio). Si un mismo individuo aparece simultáneamente en entrenamiento y prueba, el modelo memoriza su identidad y sobreestima drásticamente su capacidad real de generalización.
+\end{itemize}
+
+\begin{warningbox}[Taxonomía del Data Leakage (fuga de datos) y cómo prevenirlo]
+El \textit{data leakage} ocurre cuando información inaccesible en el momento real de la predicción se filtra en el entrenamiento, produciendo métricas artificialmente brillantes en laboratorio y un colapso catastrófico en producción. Existen tres modalidades principales:
+\begin{enumerate}
+  \item \textbf{Fuga temporal (\textit{look-ahead bias}):} usar datos futuros en el entrenamiento mediante splits aleatorios sobre datos temporales o agregaciones históricas calculadas sin corte estricto por marca temporal (\textit{point-in-time}).
+  \item \textbf{Fuga de preprocesamiento (\textit{preprocessing leakage}):} ajustar escaladores, imputadores, PCA, selección de variables o técnicas de sobremuestreo (SMOTE) sobre el dataset completo \textit{antes} de dividir en \textit{train/val/test}. \textbf{Solución:} dividir primero y encapsular todo el preprocesamiento dentro de un \code{Pipeline}.
+  \item \textbf{Fuga de objetivo (\textit{target leakage}):} incluir una característica que es consecuencia directa del evento objetivo o que solo se registra tras conocerse el desenlace (p.~ej., incluir \code{motivo\_baja} o \code{descuento\_retencion\_aplicado} en un modelo de predicción de \textit{churn}). \textbf{Solución:} auditar la línea temporal de disponibilidad de cada columna con expertos de dominio y desconfiar sistemáticamente de cualquier modelo cuyo AUC inicial parezca «demasiado bueno para ser cierto».
+\end{enumerate}
+\end{warningbox}
+
+% ----------------------------------------------------------------------------
+\subsection{Macro-fase 3: Aprendizaje del modelo (Etapas 6 a 8)}
+% ----------------------------------------------------------------------------
+
+\subsubsection{Etapa 6: Construcción del modelo, \textit{baseline-first} y optimización de hiperparámetros}
+
+La disciplina de ingeniería exige seguir una filosofía \textbf{\textit{baseline-first}}: antes de invertir semanas entrenando redes profundas o \textit{ensembles} costosos, se construye de extremo a extremo una referencia trivial (heurística de negocio o \code{DummyClassifier}) seguida de un modelo sencillo, rápido e interpretable (regresión logística regularizada o árbol de decisión poco profundo). Esta línea base valida la integridad del pipeline, establece el suelo mínimo de rendimiento y permite cuantificar con precisión si el incremento en complejidad de un \textit{Gradient Boosted Decision Tree} (XGBoost, LightGBM, CatBoost) o una arquitectura neuronal justifica realmente su sobrecoste en latencia y mantenimiento.
+
+Para maximizar la capacidad de generalización sin sobreajuste se combinan técnicas de \textbf{regularización} (penalizaciones $L_1$/$L_2$, poda de profundidad, submuestreo de columnas, \textit{dropout} y \textit{early stopping}) con \textbf{optimización sistemática de hiperparámetros (HPO)}:
+\begin{itemize}
+  \item \textbf{\textit{Grid Search}:} exhaustivo pero víctima de la maldición de la dimensionalidad; solo práctico en espacios de 2--3 hiperparámetros discretos.
+  \item \textbf{\textit{Random Search}:} como demostraron Bergstra y Bengio (2012), muestrear aleatoriamente explora muchas más coordenadas distintas de los hiperparámetros verdaderamente influyentes con el mismo presupuesto computacional.
+  \item \textbf{Optimización Bayesiana y poda temprana (\pkg{Optuna}):} algoritmos secuenciales como \textbf{TPE} (\textit{Tree-structured Parzen Estimator}) modelan la distribución condicional $p(\theta \mid y)$ para concentrar las evaluaciones en regiones prometedoras del espacio de búsqueda, y se combinan con algoritmos de parada anticipada multi-brazo como \textbf{Hyperband / ASHA} que descartan rápidamente los ensayos poco prometedores. Todo ensayo debe quedar registrado automáticamente en un sistema de tracking (Capítulo~\ref{chap:mlflow-clasico}).
+\end{itemize}
+
+\subsubsection{Etapa 7: Validación del modelo, negocio, \textit{sliced evaluation} y calibración}
+
+Un error habitual en equipos inmaduros consiste en seleccionar el modelo ganador únicamente porque maximiza una métrica técnica agregada (como la exactitud o \textit{accuracy}). La validación profesional en MLOps exige cuatro verificaciones complementarias:
+
+\begin{enumerate}
+  \item \textbf{Alineación entre métrica técnica y KPI de negocio:} la métrica debe reflejar la asimetría económica real. En detección de fraude, un falso negativo puede costar 500\,€ mientras que una alerta falsa cuesta 3\,€ de revisión. Optimizar la función de utilidad esperada sobre la curva Precisión-Recall permite elegir el umbral de decisión operativo $\tau^*$ distinto del valor por defecto $0.5$. En regresión, el RMSE penaliza severamente los grandes errores puntuales frente al MAE, más robusto ante valores atípicos.
+  \item \textbf{Evaluación segmentada (\textit{Sliced Evaluation}) y equidad (\textit{Fairness}):} una métrica global del 94\% puede ocultar un rendimiento catastrófico del 58\% en un segmento crítico (nuevos usuarios, dispositivos iOS antiguos, zonas rurales o grupos demográficos protegidos). Evaluar sistemáticamente sobre cortes (\textit{slices}) de negocio y comprobar métricas de equidad como la paridad demográfica o la igualdad de oportunidades (\textit{equalized odds}) evita sesgos discriminatorios y pérdidas silenciosas en nichos de alto valor.
+  \item \textbf{Calibración de probabilidades:} muchos algoritmos modernos (redes neuronales profundas, SVM, \textit{boosting}) producen puntuaciones que ordenan bien las instancias (alto ROC-AUC) pero están mal calibradas como probabilidades reales: un 0.80 predicho no implica una frecuencia empírica del 80\%. Cuando las probabilidades alimentan cálculos de riesgo esperado o subastas de publicidad, es indispensable medir el \textit{Brier Score} o el \textit{Expected Calibration Error} (ECE) y aplicar calibración post-hoc (\textit{Platt scaling} o regresión isotónica) sobre un conjunto reservado.
+  \item \textbf{Diagnóstico de sesgo y varianza:} contrastar de forma sistemática las curvas de aprendizaje en \textit{train} y \textit{validation} permite discernir si el modelo sufre subajuste (\textit{high bias}, ambos errores altos $\rightarrow$ se requieren mejores características o mayor capacidad) o sobreajuste (\textit{high variance}, brecha amplia entre train y val $\rightarrow$ se requiere más regularización, simplificación o más datos).
+\end{enumerate}
+
+\subsubsection{Etapa 8: Entrenamiento a escala y optimización de cómputo}
+
+Cuando el volumen de datos supera la memoria RAM de un nodo o los parámetros del modelo (redes profundas, modelos fundacionales, LLMs) exceden la VRAM de una única GPU, el entrenamiento debe distribuirse eficientemente combinando estrategias de paralelismo y optimización de hardware:
+
+\begin{itemize}
+  \item \textbf{Paralelismo de datos (\textit{Distributed Data Parallel}, DDP):} cada GPU mantiene una réplica completa del modelo y procesa un \textit{micro-batch} distinto de datos; tras el paso \textit{backward}, los gradientes se promedian entre todos los nodos mediante una operación colectiva \code{AllReduce} (habitualmente sobre NCCL/NVLink o InfiniBand). Es el patrón más eficiente mientras el modelo quepa en la memoria de una GPU.
+  \item \textbf{Paralelismo de modelo (\textit{Tensor}, \textit{Pipeline} y \textit{Sharded/ZeRO/FSDP}):} cuando los pesos y estados del optimizador (p.~ej.\ Adam en FP32 consume hasta 16 bytes por parámetro) no caben en una sola tarjeta, se fragmentan las matrices de cada capa entre GPUs (\textit{Tensor Parallelism}), se reparten capas consecutivas por etapas (\textit{Pipeline Parallelism}) o se particionan estados del optimizador, gradientes y pesos con \textbf{DeepSpeed ZeRO} o \textbf{PyTorch FSDP} (\textit{Fully Sharded Data Parallel}).
+  \item \textbf{Ecosistema de frameworks distribuidos:} \pkg{Spark ML} destaca en modelos tabulares lineales y de árboles directamente sobre el Data Lake; \pkg{Ray Train} ofrece un plano de orquestación unificado y elástico en Python sobre PyTorch, XGBoost y LightGBM; \pkg{Horovod} popularizó el entrenamiento distribuido con \textit{ring-AllReduce}; y \pkg{DeepSpeed} domina el entrenamiento a gran escala de modelos neuronales y LLMs.
+  \item \textbf{Eficiencia de memoria y E/S:} el entrenamiento en \textbf{precisión mixta (\code{FP16} / \code{BF16})} reduce casi a la mitad el consumo de VRAM y acelera el cómputo en \textit{Tensor Cores} (prefiriéndose \code{BF16} en GPUs modernas por conservar el rango dinámico de \code{FP32} sin necesidad de \textit{loss scaling}). El \textbf{\textit{gradient checkpointing}} libera memoria descartando activaciones intermedias durante el paso directo y recomputándolas durante la retropropagación. Por último, evitar que las GPUs permanezcan ociosas esperando a disco exige optimizar el \textit{data loading} mediante lectura asíncrona multi-hilo (\textit{prefetching}) y formatos secuenciales amigables con almacenamiento de objetos como \pkg{WebDataset} (archivos \code{.tar} fragmentados) o Parquet particionado.
+\end{itemize}
+
+% ----------------------------------------------------------------------------
+\subsection{Macro-fase 4: Despliegue, servicio y operación continua (Etapas 9 a 11)}
+% ----------------------------------------------------------------------------
+
+\subsubsection{Etapas 9 y 10: Despliegue (\textit{Roll-out}) y Servicio (\textit{Serving})}
+
+El \textbf{despliegue (\textit{roll-out})} transfiere un modelo validado desde el registro centralizado (\textit{Model Registry}) hasta el entorno productivo mediante pipelines CI/CD reproducibles y estrategias de liberación progresiva (Shadow, Canary, A/B Testing y Blue/Green) que minimizan el radio de impacto ante regresiones inesperadas; analizaremos en detalle estas estrategias en la Sección~\ref{sec:mlflow-serving-cicd}.
+
+El \textbf{servicio (\textit{serving})} determina cómo se entregan las predicciones a los consumidores finales. No existe una arquitectura universal: la elección depende de la latencia requerida, el volumen de peticiones y la frescura necesaria de las características. La Tabla~\ref{tab:patrones-serving} resume los tres patrones arquitectónicos dominantes.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa de los tres patrones principales de servicio (\textit{serving}) de modelos en producción.}
+\label{tab:patrones-serving}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.8cm} Y Y Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Criterio} &
+\textcolor{white}{\sffamily\bfseries Online (REST / gRPC)} &
+\textcolor{white}{\sffamily\bfseries Batch Scoring} &
+\textcolor{white}{\sffamily\bfseries Streaming Inference} \\
+\midrule
+Latencia típica &
+Milisegundos ($5\text{--}150\text{ ms}$ en p99). &
+Minutos u horas (ventanas programadas). &
+Subsegundo a pocos segundos (casi tiempo real). \\
+\rowcolor{TableStripe}
+Tecnologías habituales &
+FastAPI, NVIDIA Triton, TorchServe, KServe, MLflow Serving. &
+Apache Spark, SQL/Snowpark, Ray Data, Airflow + contenedores. &
+Apache Kafka + Apache Flink / Spark Structured Streaming. \\
+Origen de features &
+Payload de la petición + Online Feature Store (Redis/DynamoDB). &
+Offline Feature Store / Data Warehouse / Data Lake. &
+Flujo de eventos + ventanas con estado (\textit{stateful}) + caché. \\
+\rowcolor{TableStripe}
+Complejidad operativa &
+Alta (autoescalado, balanceo, alta disponibilidad 24/7, SLA estricto). &
+Baja-media (ejecución efímera, fácil reintento y reprocesamiento). &
+Alta (gestión de estado, marcas de agua, semántica \textit{exactly-once}). \\
+Casos de uso representativos &
+Autorización de tarjetas, búsqueda, precios en tiempo real, chatbots. &
+Scoring diario de \textit{churn}, segmentación de campañas, pronóstico de inventario. &
+Detección de fraude en flujo, anomalías IoT, moderación de contenido en vivo. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Para optimizar costes y latencia en inferencia online se recurre a dos palancas de ingeniería clave: (i)~\textbf{caché de predicciones} en memoria (p.~ej.\ Redis) cuando un subconjunto reducido de entidades concentra la mayor parte del tráfico (regla de Pareto en catálogos de productos o recomendaciones); y (ii)~\textbf{optimización del grafo y compresión}, exportando modelos de PyTorch, scikit-learn o XGBoost a \textbf{ONNX Runtime} o NVIDIA TensorRT y aplicando \textbf{cuantización} (de FP32 a INT8 o FP8) y \textit{dynamic batching} para multiplicar el \textit{throughput} por GPU con pérdidas despreciables de precisión.
+
+\subsubsection{Etapa 11: Monitorización y \textit{Logging} en tres niveles}
+
+Una vez en producción, el silencio del servidor no implica salud del modelo: un endpoint puede responder HTTP 200 en 12 milisegundos mientras emite predicciones completamente erróneas. La observabilidad integral en MLOps se organiza en \textbf{tres niveles complementarios}:
+
+\begin{enumerate}
+  \item \textbf{Nivel de sistema y operaciones (infraestructura):} latencia por percentiles (\textbf{p50, p95, p99}), \textit{throughput} (peticiones por segundo), tasa de errores (HTTP 4xx/5xx, \textit{timeouts}), saturación de CPU/GPU/VRAM y longitud de colas. Se recolecta habitualmente con \pkg{Prometheus} y se visualiza con alertas en \pkg{Grafana} (Alertmanager / PagerDuty).
+  \item \textbf{Nivel de calidad de datos y distribuciones:} porcentaje repentino de nulos o valores fuera de rango, aparición de categorías inéditas y métricas de deriva (\textit{data drift} y \textit{prediction drift}, calculadas con herramientas como \pkg{Evidently AI} o trabajos programados en Airflow). Es la señal de alerta más temprana porque no depende de esperar a la etiqueta real.
+  \item \textbf{Nivel de calidad del modelo y negocio:} exactitud, F1, calibración y KPIs económicos reales (tasa de conversión, pérdidas por impago, ingresos incrementales). Su principal desafío es el \textbf{\textit{delayed ground truth}}: en concesión de créditos, saber si un préstamo entra en mora puede tardar 90 o 180 días. Mientras llegan las etiquetas definitivas, se monitorizan métricas proxy (tasa de aprobación, distribución de puntuaciones, discrepancias con reglas heurísticas).
+\end{enumerate}
+
+Para cerrar el ciclo y permitir auditoría, depuración y reentrenamiento, el servicio debe emitir \textbf{\textit{prediction logs} estructurados} (escritos de forma asíncrona hacia Kafka o almacenamiento de objetos para no penalizar la latencia) conteniendo: identificador único de solicitud (\code{request\_id}), identificador de entidad, versión exacta y alias del modelo, marca temporal, vector de características recibido (o su referencia) y la distribución completa de salida (probabilidades y clase decidida).
+
+% ============================================================================
+\section[Feature Stores y Training-Serving Skew]{Feature Stores y la erradicación del \textit{Training-Serving Skew}}\label{sec:mlops-feature-stores}
+% ============================================================================
+
+\subsection{Anatomía del \textit{Training-Serving Skew} y corrección \textit{Point-in-Time}}
+
+Entre los fallos más destructivos y difíciles de diagnosticar en sistemas de ML productivos destaca el \textbf{\textit{training-serving skew}}: la divergencia sistemática entre cómo se calculan o distribuyen las características durante el entrenamiento fuera de línea y cómo se calculan o suministran durante la inferencia en producción. Su peligrosidad reside en que rara vez lanza excepciones; el modelo continúa devolviendo números plausibles mientras su capacidad discriminativa se derrumba.
+
+Consideremos un ejemplo tan cotidiano como revelador: el cálculo de la característica \code{edad} de un cliente a partir de su fecha de nacimiento. El científico de datos escribe en su cuaderno Python/Pandas:
+\[
+\texttt{edad} = \lfloor (\texttt{fecha\_actual} - \texttt{fecha\_nacimiento}).\texttt{days} / 365.25 \rfloor
+\]
+Meses después, al integrar el modelo en el microservicio de producción escrito en Java, el equipo de ingeniería backend reimplementa la característica utilizando \code{Period.between(nacimiento, hoy).getYears()} en zona horaria local en lugar de UTC, o aplicando un valor por defecto \code{0} (en vez de \code{NaN} imputado por la mediana) cuando la fecha no viene informada. La diferencia sutil en años bisiestos, husos horarios y manejo de nulos introduce una discrepancia silenciosa. Cuando este fenómeno se multiplica por cincuenta características complejas ---como medias móviles de 7 días, conteos de eventos distintos en ventanas deslizantes o tasas históricas por comercio---, mantener dos bases de código paralelas (una en SQL/Spark para entrenar y otra en Java/Go para servir) garantiza prácticamente la aparición del sesgo.
+
+Un segundo problema íntimamente relacionado es la \textbf{corrección temporal puntual (\textit{Point-in-Time Correctness})}. Supongamos que entrenamos un modelo de riesgo con solicitudes históricas ocurridas a lo largo de seis meses y cruzamos la tabla de solicitudes con la tabla actual de perfiles de clientes (\code{saldo\_medio\_30d}). Si realizamos un \code{JOIN} convencional por \code{cliente\_id}, inyectaremos en una solicitud de enero el saldo que el cliente tenía en junio ---un caso severo de fuga temporal---. Garantizar corrección \textit{point-in-time} exige ejecutar un \textbf{\textit{as-of join}} temporal: para cada evento de entidad $e$ en el instante $t_i$, recuperar exclusivamente el valor más reciente de cada característica cuyo instante de evento $t_f$ satisfaga
+\[
+t_i - \text{TTL} \le t_f \le t_i
+\]
+respetando la ventana de validez (\textit{Time-To-Live}, TTL) para no reutilizar valores obsoletos.
+
+\subsection{Arquitectura dual de un Feature Store moderno}
+
+Un \textbf{Feature Store} es una plataforma centralizada de gestión de datos diseñada específicamente para ML que resuelve simultáneamente la reutilización entre equipos, la consistencia entre entrenamiento e inferencia y el acceso de baja latencia. Su arquitectura se fundamenta en el patrón de \textbf{almacenamiento dual} gobernado por un registro único de definiciones, tal como muestra la Figura~\ref{fig:feature-store-arch}.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.8cm and 1.0cm]
+  % Fuentes de datos (izquierda)
+  \node[dbnode, minimum width=2.5cm, minimum height=1.2cm] (src_batch) at (0, 3.85) {Data Lake /\\Warehouse};
+  \node[tealbox, minimum width=2.5cm, minimum height=1.1cm, text width=2.3cm] (src_stream) at (0, 1.0) {Eventos Streaming\\{\normalfont\scriptsize Kafka / Kinesis}};
+
+  % Pipelines de transformación
+  \node[archbox, minimum width=2.8cm, minimum height=1.1cm, text width=2.6cm] (pipe_batch) at (3.75, 3.85) {Transformación Batch\\{\normalfont\scriptsize Airflow + Spark / dbt}};
+  \node[tealbox, minimum width=2.8cm, minimum height=1.1cm, text width=2.6cm] (pipe_stream) at (3.75, 1.0) {Transformación Stream\\{\normalfont\scriptsize Flink / Spark Streaming}};
+
+  % Contenedor central: Feature Store (espaciado amplio para cero solapamientos)
+  \node[darkbox, minimum width=6.8cm, minimum height=0.82cm] (reg) at (10.7, 5.7)
+    {Feature Registry (Definición única, esquemas, linaje, TTL)};
+
+  \node[dbnode, minimum width=2.85cm, minimum height=1.55cm, fill=InfoBg] (offline) at (8.8, 3.65)
+    {Offline Store\\{\normalfont\tiny Parquet / BigQuery}\\{\normalfont\tiny Snowflake / Iceberg}};
+
+  \node[dbnode, draw=TealAccent, fill=ModernBg, minimum width=2.85cm, minimum height=1.55cm] (online) at (12.6, 0.9)
+    {Online Store\\{\normalfont\tiny Redis / DynamoDB}\\{\normalfont\tiny Latencia < 10 ms}};
+
+  % Marco agrupador del Feature Store
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(reg)(offline)(online), inner sep=13pt,
+          label={[font=\sffamily\footnotesize\bfseries, text=PrimaryDark]above:Arquitectura Dual del Feature Store}] (fsbox) {};
+  \end{scope}
+
+  % Consumidores (derecha con amplio margen para etiquetas de API)
+  \node[archbox, minimum width=3.1cm, minimum height=1.25cm, text width=2.9cm] (cons_train) at (18.6, 3.85)
+    {Entrenamiento y Batch\\{\normalfont\scriptsize Point-in-Time Joins}\\{\normalfont\scriptsize (MLflow + Airflow)}};
+
+  \node[amberbox, minimum width=3.1cm, minimum height=1.25cm, text width=2.9cm] (cons_serv) at (18.6, 0.9)
+    {Servicio Online (API)\\{\normalfont\scriptsize Búsqueda por clave}\\{\normalfont\scriptsize (FastAPI / KServe)}};
+
+  % Flechas de flujo
+  \draw[flowarrow] (src_batch) -- (pipe_batch);
+  \draw[tealarrow] (src_stream) -- (pipe_stream);
+
+  \draw[flowarrow] (pipe_batch.east) -- ++(0.95, 0) |- node[elabel, pos=0.72, above] {Escritura histórica} (offline.west);
+  \draw[tealarrow] (pipe_stream.east) -- node[elabel, pos=0.45, below] {Escritura baja latencia} (online.west);
+  \draw[dashedarrow] (pipe_stream.north east) -- node[elabel, pos=0.42, sloped, above] {Archivado} (offline.south west);
+
+  % Materialización Offline -> Online (centrada en el hueco amplio entre cilindros)
+  \draw[flowarrow, line width=1.15pt, color=AmberAccent]
+    (offline.south east) -- node[elabel, pos=0.52, sloped, above=2pt, text=AmberAccent] {Materialización} (online.north west);
+
+  % Registro gobierna ambos almacenes
+  \draw[dashedarrow] (reg.south) -| (offline.north);
+  \draw[dashedarrow] (reg.south) -| (online.north);
+
+  % Consumo (etiquetas ubicadas holgadamente fuera del contenedor)
+  \draw[flowarrow] (offline.east) -- ++(2.2, 0) |- node[elabel, pos=0.76, above=2pt] {\code{get\_historical\_features()}} (cons_train.west);
+  \draw[tealarrow] (online.east) -- node[elabel, pos=0.52, above=2pt] {\code{get\_online\_features()}} (cons_serv.west);
+\end{tikzpicture}%
+}
+\caption{Arquitectura dual de un Feature Store: un único registro declarativo gobierna un almacén fuera de línea (histórico, optimizado para \textit{as-of joins} masivos) y un almacén en línea (clave-valor, optimizado para inferencia en milisegundos), sincronizados mediante procesos de materialización.}
+\label{fig:feature-store-arch}
+\end{figure}
+
+Los cuatro componentes cooperan con responsabilidades bien delimitadas:
+\begin{itemize}
+  \item \textbf{Feature Registry:} catálogo central y fuente única de verdad donde se versionan las definiciones de entidades, vistas de características, transformaciones, tipos, propietarios y TTL. Permite que distintos equipos descubran y reutilicen variables ya curadas (p.~ej., \code{cliente\_gasto\_30d}) en lugar de recomputarlas.
+  \item \textbf{Offline Store:} respaldado por almacenamiento columnar o almacenes analíticos (Parquet sobre S3/GCS, Apache Iceberg, BigQuery, Snowflake, Redshift). Almacena meses o años de histórico con marcas temporales para construir datasets de entrenamiento libres de fuga mediante \textit{point-in-time joins} y para inferencia \textit{batch}.
+  \item \textbf{Online Store:} respaldado por bases de datos clave-valor en memoria o SSD de bajísima latencia (Redis, Amazon DynamoDB, Cassandra, PostgreSQL optimizado). Guarda exclusivamente el valor vigente más reciente por clave de entidad para servir vectores completos de características en pocos milisegundos.
+  \item \textbf{Pipelines de ingestión y materialización:} trabajos orquestados (Airflow + Spark/dbt) que calculan nuevas particiones y las \textit{materializan} periódicamente desde el almacén \textit{offline} hacia el \textit{online}, complementados por flujos \textit{streaming} (Flink) cuando se requieren agregaciones con frescura de segundos.
+\end{itemize}
+
+\subsection{Definición y consumo de características con Feast}
+
+\pkg{Feast} (\textit{Feature Store}) es la implementación \textit{open-source} más extendida en arquitecturas modernas por su diseño liviano y agnóstico a la nube: en lugar de imponer un motor de almacenamiento propietario, se apoya sobre las tecnologías que la organización ya opera (Parquet/BigQuery/Snowflake como \textit{offline store} y Redis/DynamoDB/SQLite como \textit{online store}). El Listado~\ref{lst:feast-feature-store} muestra la definición declarativa de una entidad y una vista de características, seguida de su consumo consistente en entrenamiento e inferencia.
+
+\begin{lstlisting}[style=python, caption={Definición declarativa y consumo dual (histórico vs.\ online) de características en Feast.}, label={lst:feast-feature-store}]
+from datetime import timedelta
+import pandas as pd
+from feast import Entity, FeatureStore, FeatureView, Field, FileSource, ValueType
+from feast.types import Float32, Int64
+
+# ------------------------------------------------------------------
+# 1. Definicion declarativa en el repositorio de features (features.py)
+# ------------------------------------------------------------------
+cliente = Entity(
+    name="cliente_id",
+    join_keys=["cliente_id"],
+    value_type=ValueType.INT64,
+    description="Identificador unico del titular de la cuenta",
+)
+
+fuente_actividad = FileSource(
+    name="actividad_tarjetas_parquet",
+    path="s3://ml-feature-lake/silver/actividad_tarjetas.parquet",
+    timestamp_field="event_timestamp",
+    created_timestamp_column="created_timestamp",
+)
+
+vista_riesgo_cliente = FeatureView(
+    name="riesgo_cliente_ventanas",
+    entities=[cliente],
+    ttl=timedelta(days=7),  # Descarta valores mas antiguos que 7 dias
+    schema=[
+        Field(name="num_tx_ultimas_24h", dtype=Int64),
+        Field(name="importe_medio_7d", dtype=Float32),
+        Field(name="ratio_tx_internacionales_30d", dtype=Float32),
+    ],
+    online=True,
+    source=fuente_actividad,
+    tags={"dominio": "fraude", "owner": "equipo-riesgo"},
+)
+
+# ------------------------------------------------------------------
+# 2. Consumo OFFLINE en entrenamiento (Point-in-Time Join exacto)
+# ------------------------------------------------------------------
+store = FeatureStore(repo_path="./feature_repo")
+
+# Dataframe de etiquetas historicas: (cliente_id, event_timestamp, es_fraude)
+entity_df = pd.read_parquet("s3://ml-feature-lake/labels/fraude_2026_q1.parquet")
+
+features_solicitadas = [
+    "riesgo_cliente_ventanas:num_tx_ultimas_24h",
+    "riesgo_cliente_ventanas:importe_medio_7d",
+    "riesgo_cliente_ventanas:ratio_tx_internacionales_30d",
+]
+
+training_df = store.get_historical_features(
+    entity_df=entity_df,
+    features=features_solicitadas,
+).to_df()
+
+# ------------------------------------------------------------------
+# 3. Consumo ONLINE en el microservicio de inferencia (< 10 ms)
+# ------------------------------------------------------------------
+online_vector = store.get_online_features(
+    features=features_solicitadas,
+    entity_rows=[{"cliente_id": 849201}],
+).to_dict()
+\end{lstlisting}
+
+\begin{examplebox}[Caso práctico: consistencia de ventanas móviles en detección de fraude]
+En un banco digital que procesa 1\,200 autorizaciones de tarjeta por segundo, la variable más predictiva de robo de credenciales es \code{num\_tx\_ultimas\_24h} combinada con \code{importe\_medio\_7d}. Sin un Feature Store, el equipo de ciencia de datos calculaba ambas variables mediante funciones ventana SQL sobre BigQuery, mientras que el servicio de pagos en Java consultaba una tabla auxiliar actualizada por un proceso nocturno con lógica distinta de zona horaria. Al migrar a Feast respaldado por BigQuery (\textit{offline}) y Redis (\textit{online}), más un flujo Flink que actualiza la vista en tiempo real y un DAG de Airflow que ejecuta \code{store.materialize\_incremental(end\_date)} cada hora para características lentas, el equipo eliminó por completo la divergencia entrenamiento-servicio y redujo en un 18\% los falsos positivos en producción sin modificar la arquitectura del modelo.
+\end{examplebox}
+
+% ============================================================================
+\section[Data, Concept y Label Drift]{Data Drift, Concept Drift y Label Drift: teoría, detección y remediación}\label{sec:mlops-drift}
+% ============================================================================
+
+\subsection{Formulación probabilística de la deriva en producción}
+
+A diferencia de una pieza mecánica, un modelo estadístico no sufre «desgaste físico»; se degrada porque la distribución conjunta real de los datos y las etiquetas en producción, $P_{\text{prod}}(X, Y)$, se aleja de la distribución sobre la que fue entrenado, $P_{\text{train}}(X, Y)$. Factorizando la distribución conjunta mediante la regla de Bayes en sus dos descomposiciones equivalentes:
+\[
+P(X, Y) = P(Y \mid X)\, P(X) = P(X \mid Y)\, P(Y)
+\]
+obtenemos la taxonomía formal de los tres mecanismos de deriva (\textit{distribution shift}):
+
+\begin{enumerate}
+  \item \textbf{\textit{Covariate Shift} (\textit{Data Drift}):} cambia la distribución marginal de las características de entrada, $P_{\text{prod}}(X) \neq P_{\text{train}}(X)$, mientras la relación subyacente entre entradas y objetivo permanece inalterada, $P_{\text{prod}}(Y \mid X) = P_{\text{train}}(Y \mid X)$. Aunque la frontera real de decisión no haya cambiado, el modelo se ve obligado a extrapolar en regiones del espacio de características donde apenas vio ejemplos durante el entrenamiento. Un ejemplo canónico es un modelo de demanda hotelera entrenado con datos previos a la pandemia que en 2020 recibe súbitamente patrones de antelación, duración y origen radicalmente distintos.
+  \item \textbf{\textit{Concept Drift} (deriva de concepto):} cambia la propia relación condicional entre las entradas y la variable objetivo, $P_{\text{prod}}(Y \mid X) \neq P_{\text{train}}(Y \mid X)$, incluso si la distribución marginal $P(X)$ se mantiene estable. Lo que antes constituía una transacción legítima puede pasar a ser fraudulenta ante una nueva táctica de ataque coordinado, o un mismo precio puede dejar de convertir cuando entra un nuevo competidor en el mercado. El \textit{concept drift} puede manifestarse de forma \textit{súbita} (cambio regulatorio), \textit{gradual} (evolución de hábitos), \textit{incremental} (inflación progresiva) o \textit{recurrente} (estacionalidad navideña).
+  \item \textbf{\textit{Label Drift} (\textit{Prior Probability Shift}):} cambia la distribución a priori de la variable objetivo, $P_{\text{prod}}(Y) \neq P_{\text{train}}(Y)$, mientras las distribuciones condicionales de las características dada la clase permanecen estables, $P_{\text{prod}}(X \mid Y) = P_{\text{train}}(X \mid Y)$. Ocurre típicamente en diagnósticos médicos durante un brote epidémico (los síntomas de la gripe no han cambiado, pero su prevalencia poblacional se multiplica por diez), descalibrando las probabilidades posteriores emitidas por el clasificador.
+\end{enumerate}
+
+La Tabla~\ref{tab:taxonomia-drift} sintetiza las diferencias operativas entre las tres formas de deriva, destacando un hecho crucial para el diseño de alertas: el \textit{data drift} puede medirse inmediatamente sobre las entradas en producción sin esperar a las etiquetas reales, mientras que confirmar \textit{concept drift} exige disponer de \textit{ground truth} (o proxies de negocio muy correlacionados).
+
+\begin{table}[htbp]
+\centering
+\caption{Taxonomía probabilística y operativa de la deriva en sistemas de Machine Learning.}
+\label{tab:taxonomia-drift}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.5cm} C{2.7cm} C{1.9cm} Y Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Tipo de deriva} &
+\textcolor{white}{\sffamily\bfseries Cambio formal} &
+\textcolor{white}{\sffamily\bfseries ¿Requiere $Y$ real?} &
+\textcolor{white}{\sffamily\bfseries Ejemplo representativo} &
+\textcolor{white}{\sffamily\bfseries Remediación habitual} \\
+\midrule
+Covariate Shift (Data Drift) &
+$P(X)$ cambia; $P(Y \mid X)$ constante &
+\nomark\ (solo entradas $X$) &
+Modelo entrenado pre-pandemia recibiendo tráfico de 2020; expansión a un nuevo país. &
+Reentrenar incorporando muestras de las nuevas regiones; reponderación por densidad (\textit{importance weighting}). \\
+\rowcolor{TableStripe}
+Concept Drift &
+$P(Y \mid X)$ cambia; $P(X)$ estable &
+\yesmark\ (o proxy de negocio) &
+Defraudadores adoptando nuevas tácticas; cambio en el comportamiento de compra por inflación. &
+Reentrenamiento en ventana deslizante reciente, decaimiento temporal de pesos o aprendizaje incremental. \\
+Label / Prior Drift &
+$P(Y)$ cambia; $P(X \mid Y)$ constante &
+\yesmark\ (estimable vía $P(\hat{Y})$) &
+Brote estacional que multiplica la tasa base de morosidad o enfermedad. &
+Recalibración Bayesiana de probabilidades a priori (\textit{prior adjustment}) y ajuste del umbral $\tau^*$. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Métricas estadísticas para la cuantificación de deriva}
+
+Detectar deriva de forma automática exige traducir el cambio entre una ventana de referencia $Q$ (típicamente el conjunto de entrenamiento o validación reciente) y una ventana actual de producción $P$ en estadísticos interpretables y acotados. Las cuatro métricas de referencia en MLOps son:
+
+\subsubsection{Population Stability Index (PSI)}
+
+Originado en la industria financiera de riesgo crediticio, el PSI discretiza una característica continua en $B$ intervalos (\textit{bins}, habitualmente $B=10$ basados en los deciles de la distribución de referencia $Q$) o toma directamente las categorías de una variable discreta, y mide la divergencia simétrica entre las proporciones observadas $p_i$ en producción y $q_i$ en referencia:
+\begin{equation}\label{eq:psi}
+\text{PSI}(P, Q) = \sum_{i=1}^{B} (p_i - q_i) \ln\left(\frac{p_i}{q_i}\right) = D_{\text{KL}}(P \parallel Q) + D_{\text{KL}}(Q \parallel P)
+\end{equation}
+Para evitar divisiones por cero cuando algún intervalo queda vacío en producción, se aplica un suavizado mínimo $\varepsilon \approx 10^{-6}$ antes de renormalizar. El PSI es simétrico, siempre no negativo y dispone de umbrales operativos ampliamente consolidados en la industria:
+\begin{itemize}
+  \item $\text{PSI} < 0.10$: distribución estable; no requiere intervención.
+  \item $0.10 \le \text{PSI} < 0.25$: cambio moderado; disparar alerta de investigación al equipo de ML y vigilar KPIs de negocio.
+  \item $\text{PSI} \ge 0.25$: deriva severa; ejecutar diagnóstico de calidad de datos (para descartar fallos de ingesta) y disparar el pipeline de reentrenamiento automático.
+\end{itemize}
+
+\subsubsection{Prueba de Kolmogorov-Smirnov (KS) de dos muestras}
+
+Para variables numéricas continuas sin necesidad de elegir número de intervalos, el test no paramétrico de Kolmogorov-Smirnov mide la máxima distancia vertical entre las funciones de distribución empíricas acumuladas $F_{1,n}(x)$ (referencia, tamaño $n$) y $F_{2,m}(x)$ (producción, tamaño $m$):
+\begin{equation}\label{eq:ks}
+D_{n,m} = \sup_{x \in \mathbb{R}} \left| F_{1,n}(x) - F_{2,m}(x) \right|
+\end{equation}
+Bajo la hipótesis nula $H_0: P = Q$, el estadístico normalizado permite calcular un $p$-valor exacto o asintótico. Conviene recordar una precaución práctica fundamental en sistemas Big Data: cuando $n$ y $m$ superan decenas de miles de registros, el test KS posee tanta potencia estadística que diferencias triviales e irrelevantes para el negocio arrojan $p < 10^{-6}$, generando fatiga de alertas. Por ello, en producción nunca se debe alertar únicamente por $p$-valor, sino exigiendo simultáneamente significación estadística y un tamaño de efecto mínimo (p.~ej., $D_{n,m} > 0.10$).
+
+\subsubsection{Divergencia de Jensen-Shannon (JSD)}
+
+La divergencia de Kullback-Leibler es asimétrica y diverge a infinito si $q_i = 0$ donde $p_i > 0$. La divergencia de Jensen-Shannon soluciona ambos defectos promediando ambas direcciones respecto a la distribución mezcla $M = \frac{1}{2}(P + Q)$:
+\begin{equation}\label{eq:jsd}
+\text{JSD}(P \parallel Q) = \frac{1}{2}\, D_{\text{KL}}(P \parallel M) + \frac{1}{2}\, D_{\text{KL}}(Q \parallel M)
+\end{equation}
+donde $D_{\text{KL}}(P \parallel M) = \sum_i p_i \ln(p_i / m_i)$. Su valor es siempre finito, simétrico y está acotado en $[0, \ln 2]$ (o $[0, 1]$ empleando logaritmo en base 2), y su raíz cuadrada $\sqrt{\text{JSD}(P \parallel Q)}$ conforma una métrica matemática genuina (satisface la desigualdad triangular). Resulta especialmente eficaz para variables categóricas de alta cardinalidad y distribuciones de probabilidades predichas.
+
+\subsubsection{Distancia de Wasserstein (Earth Mover's Distance)}
+
+Mientras que el PSI y la JSD comparan probabilidades punto a punto sin tener en cuenta cuán lejos están los intervalos entre sí, la distancia de Wasserstein de orden~1 ($W_1$) cuantifica el «trabajo mínimo» necesario para transportar la masa de probabilidad de $Q$ hasta igualar a $P$. Para distribuciones unidimensionales con funciones acumuladas $F_P, F_Q$ y funciones cuantil $F_P^{-1}, F_Q^{-1}$, admite una expresión cerrada particularmente elegante:
+\begin{equation}\label{eq:wasserstein}
+W_1(P, Q) = \int_{-\infty}^{+\infty} \left| F_P(x) - F_Q(x) \right| \, \mathrm{d}x = \int_{0}^{1} \left| F_P^{-1}(u) - F_Q^{-1}(u) \right| \, \mathrm{d}u
+\end{equation}
+Esta propiedad métrica convierte a $W_1$ en la opción preferida cuando las distribuciones se desplazan sin solapamiento o cuando interesa ponderar la magnitud física del desplazamiento (normalizada típicamente por la desviación estándar de referencia $\sigma_Q$ para hacerla adimensional y comparable entre variables). En problemas con cientos de características o datos no estructurados (imágenes, texto), las pruebas univariantes se complementan con detectores multivariantes como el error de reconstrucción de un \textit{autoencoder}, \textit{Maximum Mean Discrepancy} (MMD) sobre \textit{embeddings} o un clasificador de dominio entrenado para distinguir registros de referencia frente a producción (si su ROC-AUC supera $0.60\text{--}0.65$, existe deriva multivariante clara).
+
+\subsection{Detección continua y remediación automatizada con Airflow}
+
+Medir el drift de forma aislada carece de valor si no desencadena una acción operativa controlada. Un pipeline MLOps de madurez Nivel~1 o~2 integra un DAG diario en Apache Airflow que: (1)~extrae la ventana de \textit{prediction logs} de las últimas 24 horas o 7 días, (2)~calcula PSI, KS y $W_1$ para las características de mayor importancia SHAP y para la distribución de salida $\hat{Y}$, (3)~persiste el informe histórico y publica las métricas en Prometheus/Grafana, y (4)~usa una tarea de ramificación (\code{@task.branch}) para decidir si continuar sin acción, emitir una alerta de investigación o invocar el DAG de reentrenamiento continuo (\textit{Continuous Training}) y registro de un nuevo candidato en MLflow.
+
+La Figura~\ref{fig:drift-psi-f1-evolucion} representa un episodio real de degradación por deriva y recuperación automatizada a lo largo de dieciséis semanas en producción. Obsérvese cómo el PSI cruza primero la banda de advertencia ($0.10$) en la semana~7 ---anticipando la caída visible del F1-score--- y supera el umbral crítico ($0.25$) en la semana~10, momento en el cual el orquestador dispara automáticamente el reentrenamiento con datos frescos, valida al candidato y promueve la nueva versión en la semana~11, restaurando el rendimiento predictivo por encima de $0.91$.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+  \begin{axis}[
+    width=0.88\textwidth,
+    height=7.2cm,
+    xlabel={\sffamily\small Semanas en producción},
+    ylabel={\sffamily\small Population Stability Index (PSI)},
+    ylabel style={color=PrimaryAccent, font=\sffamily\small\bfseries},
+    xmin=1, xmax=16,
+    ymin=0, ymax=0.36,
+    xtick={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16},
+    ytick={0,0.05,0.10,0.15,0.20,0.25,0.30,0.35},
+    yticklabel style={/pgf/number format/fixed, /pgf/number format/precision=2, font=\sffamily\footnotesize},
+    xticklabel style={font=\sffamily\footnotesize},
+    axis y line*=left,
+    axis x line*=bottom,
+    grid=major,
+    grid style={dashed, LightBorder},
+    legend columns=2,
+    legend style={
+      at={(0.0, 1.04)}, anchor=south west,
+      font=\sffamily\scriptsize, fill=white, draw=LightBorder, rounded corners=2pt,
+      /tikz/every even column/.append style={column sep=6pt}
+    }
+  ]
+    % Zona sombreada de alerta y crítica
+    \fill[WarnBg, opacity=0.55] (axis cs:1, 0.10) rectangle (axis cs:16, 0.25);
+    \fill[CrimsonAccent!10!white, opacity=0.65] (axis cs:1, 0.25) rectangle (axis cs:16, 0.36);
+
+    % Líneas de umbral canónicas
+    \addplot[AmberAccent, dashed, line width=1pt, domain=1:16] {0.10};
+    \addlegendentry{Umbral alerta ($\text{PSI}=0.10$)}
+    \addplot[CrimsonAccent, dashed, line width=1.1pt, domain=1:16] {0.25};
+    \addlegendentry{Umbral crítico / CT ($\text{PSI}=0.25$)}
+
+    % Serie temporal PSI
+    \addplot[
+      color=PrimaryAccent, line width=1.8pt, mark=*, mark size=2.3pt,
+      mark options={fill=PrimaryAccent}
+    ] coordinates {
+      (1, 0.03) (2, 0.04) (3, 0.045) (4, 0.06) (5, 0.075)
+      (6, 0.09) (7, 0.125) (8, 0.165) (9, 0.215) (10, 0.285)
+      (11, 0.055) (12, 0.048) (13, 0.052) (14, 0.060) (15, 0.058) (16, 0.064)
+    };
+    \addlegendentry{PSI (\code{importe\_transaccion})}
+
+    % Línea vertical de disparo del DAG de Airflow
+    \draw[EmeraldAccent, line width=1.3pt, dotted] (axis cs:10.5, 0) -- (axis cs:10.5, 0.355);
+    \node[
+      anchor=north west, fill=white, draw=EmeraldAccent, rounded corners=2pt,
+      font=\sffamily\tiny\bfseries, text=EmeraldAccent, align=left, inner sep=3pt
+    ] at (axis cs:10.75, 0.348) {DAG Airflow (CT):\\reentrenamiento y\\promoción v2.4};
+  \end{axis}
+
+  \begin{axis}[
+    width=0.88\textwidth,
+    height=7.2cm,
+    xmin=1, xmax=16,
+    ymin=0.72, ymax=0.98,
+    xtick=\empty,
+    ytick={0.75, 0.80, 0.85, 0.90, 0.95},
+    yticklabel style={/pgf/number format/fixed, /pgf/number format/precision=2, font=\sffamily\footnotesize, color=TealAccent},
+    axis y line*=right,
+    axis x line=none,
+    ylabel={\sffamily\small F1-Score del modelo en producción},
+    ylabel style={color=TealAccent, font=\sffamily\small\bfseries},
+    legend style={
+      at={(1.0, 1.04)}, anchor=south east,
+      font=\sffamily\scriptsize, fill=white, draw=LightBorder, rounded corners=2pt
+    }
+  ]
+    % Serie temporal F1-Score
+    \addplot[
+      color=TealAccent, line width=1.8pt, mark=square*, mark size=2.3pt,
+      mark options={fill=TealAccent}
+    ] coordinates {
+      (1, 0.920) (2, 0.918) (3, 0.921) (4, 0.915) (5, 0.912)
+      (6, 0.905) (7, 0.888) (8, 0.864) (9, 0.832) (10, 0.788)
+      (11, 0.914) (12, 0.919) (13, 0.917) (14, 0.915) (15, 0.918) (16, 0.916)
+    };
+    \addlegendentry{F1-Score (producción)}
+  \end{axis}
+\end{tikzpicture}
+\caption{Evolución temporal conjunta del Population Stability Index (eje izquierdo) y el F1-score de un modelo de fraude en producción (eje derecho). Cuando el PSI rebasa el umbral crítico ($0.25$) en la semana~10, un DAG de Airflow dispara automáticamente el reentrenamiento sobre la ventana reciente, restaurando la estabilidad distribucional y el F1-score a partir de la semana~11.}
+\label{fig:drift-psi-f1-evolucion}
+\end{figure}
+
+Una advertencia operativa cierra este capítulo: \textbf{reentrenar automáticamente ante cualquier pico de PSI sin validación previa es peligroso}. Si el pico de PSI se debe a una avería en un conector aguas arriba que inyecta ceros o nulos masivos, reentrenar sobre esos datos corruptos envenenará el modelo. Por ello, todo bucle de remediación automática debe anteponer el \textit{quality gate} de datos (Etapa~4) y exigir que el nuevo modelo candidato supere al modelo vigente en validación (Etapa~7) antes de promoverse en el registro. Precisamente a la plataforma estándar encargada de gobernar experimentos, artefactos reproducibles, versiones de modelos y despliegues ---\textbf{MLflow}--- dedicamos íntegramente el siguiente capítulo.

@@ -1,0 +1,159 @@
+% ============================================================================
+% 00_prefacio.tex — Portada editorial, hoja de créditos y prefacio
+% ============================================================================
+
+\begin{titlepage}
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture, overlay]
+  % Banda superior azul marino profundo
+  \fill[PrimaryDark] (current page.north west) rectangle ([yshift=-9.2cm]current page.north east);
+  % Franja lateral teal moderna
+  \fill[TealAccent] (current page.north west) rectangle ([xshift=0.55cm]current page.south west);
+  % Detalle geométrico sutil en la banda superior
+  \fill[PrimaryAccent, opacity=0.45] ([xshift=11.5cm, yshift=-9.2cm]current page.north west) -- ([xshift=21cm, yshift=-9.2cm]current page.north west) -- ([xshift=21cm, yshift=-2.8cm]current page.north west) -- cycle;
+  \fill[TealAccent, opacity=0.25] ([xshift=14.2cm, yshift=-9.2cm]current page.north west) -- ([xshift=21cm, yshift=-9.2cm]current page.north west) -- ([xshift=21cm, yshift=-5.6cm]current page.north west) -- cycle;
+  % Línea divisoria teal bajo la cabecera
+  \fill[TealAccent] ([xshift=0.55cm, yshift=-9.2cm]current page.north west) rectangle ([yshift=-9.36cm]current page.north east);
+
+  % Pequeño grafo DAG decorativo en la esquina superior derecha
+  \begin{scope}[shift={([xshift=-4.4cm, yshift=-4.2cm]current page.north east)}, scale=0.85, opacity=0.35]
+    \node[circle, draw=white, line width=1pt, minimum size=0.6cm] (n1) at (0, 0) {};
+    \node[circle, draw=white, line width=1pt, minimum size=0.6cm] (n2) at (1.5, 0.9) {};
+    \node[circle, draw=white, line width=1pt, minimum size=0.6cm] (n3) at (1.5, -0.9) {};
+    \node[circle, draw=white, line width=1pt, minimum size=0.6cm] (n4) at (3.2, 0) {};
+    \draw[white, line width=1pt, ->] (n1) -- (n2);
+    \draw[white, line width=1pt, ->] (n1) -- (n3);
+    \draw[white, line width=1pt, ->] (n2) -- (n4);
+    \draw[white, line width=1pt, ->] (n3) -- (n4);
+  \end{scope}
+
+  % Pie decorativo inferior
+  \fill[SoftBg] ([xshift=0.55cm]current page.south west) rectangle ([yshift=2.6cm]current page.south east);
+  \draw[LightBorder, line width=0.6pt] ([xshift=0.55cm, yshift=2.6cm]current page.south west) -- ([yshift=2.6cm]current page.south east);
+\end{tikzpicture}
+
+\vspace*{0.6cm}
+\noindent\hspace*{0.2cm}\begin{minipage}{0.95\textwidth}
+  {\sffamily\bfseries\footnotesize\color{TealAccent!45!white}\MakeUppercase{Manual Técnico Avanzado \textbullet{} Edición Ampliada y Modernizada 2026}}\\[1.0cm]
+  {\sffamily\bfseries\fontsize{28}{33}\selectfont\color{white}Orquestación de Datos,\\[4pt]MLOps y LLMOps}\\[0.55cm]
+  {\sffamily\fontsize{14.5}{19}\selectfont\color{white!88!PrimaryAccent}Guía Integral de Apache Airflow 2.10/3.0, Conectores,\\[2pt]MLflow 3, Experimentación de Prompt Engineering y Agentes}
+\end{minipage}
+
+\vspace*{1.95cm}
+
+\noindent\hspace*{0.2cm}\begin{minipage}{0.94\textwidth}
+  {\sffamily\bfseries\large\color{PrimaryDark}Basado y ampliado a partir de la asignatura:}\\[4pt]
+  {\sffamily\normalsize\color{PrimaryAccent}\textit{Orquestación y pipelines de datos: Airflow y MLflow}}\\
+  {\small\color{MutedGray}Ingeniería Big Data en la Nube --- Grado en Ingeniería y Sistemas de Datos\\
+  Departamento de Ingeniería de Sistemas Telemáticos (DIT --- Universidad Politécnica de Madrid)}
+
+  \vspace{0.65cm}
+
+  \begin{tcolorbox}[
+    enhanced, colback=SoftBg, colframe=LightBorder, boxrule=0.6pt, arc=3pt,
+    left=10pt, right=10pt, top=8pt, bottom=8pt
+  ]
+  {\sffamily\bfseries\small\color{PrimaryDark}Alcance técnico de esta obra}\\[3pt]
+  \footnotesize
+  \begin{itemize}[leftmargin=1.2em, itemsep=2.5pt]
+    \item \textbf{Orquestación de datos:} Streaming vs. Batch, arquitectura Medallion, los siete pilares de la orquestación y comparativa del mercado actual (Airflow, Dagster, Prefect, NiFi, Kubeflow, Argo, soluciones cloud).
+    \item \textbf{Apache Airflow 2.10 y 3.0+:} Arquitectura interna, TaskFlow API, Task SDK, DAG Versioning, Assets, XComs, idempotencia, backfills, branching, TaskGroups y mapeo dinámico.
+    \item \textbf{Conectividad y Conectores en Airflow:} Providers, Connections, Secrets Backends (Vault, AWS/GCP/Azure), Hooks, Deferrable Operators, \code{SQLExecuteQueryOperator}, \code{ObjectStoragePath}, APIs REST, Spark, dbt, Kubernetes, Kafka, OpenLineage y desarrollo de conectores propios.
+    \item \textbf{MLOps y MLflow Clásico:} Deuda técnica en ML, ciclo de vida completo en 11 etapas, Feature Stores, Data/Concept Drift, Tracking, Models, Model Registry (Aliases vs. Stages), despliegue progresivo y CI/CD para ML.
+    \item \textbf{LLMOps y Prompt Engineering con MLflow 3:} Prompt Registry, experimentación rigurosa de prompts, optimización automática con DSPy y GEPA, Tracing OpenTelemetry, \code{mlflow.genai.evaluate} (LLM-as-a-Judge y RAG), \code{ResponsesAgent}, AI Gateway y monitorización continua.
+    \item \textbf{Integración End-to-End:} Dos arquitecturas completas de producción combinando Apache Airflow y MLflow (pipeline MLOps tabular con detección de drift y pipeline LLMOps/RAG con evaluación automática).
+  \end{itemize}
+  \end{tcolorbox}
+\end{minipage}
+
+\vfill
+
+\noindent\hspace*{0.2cm}\begin{minipage}{0.94\textwidth}
+  \begin{tabularx}{\textwidth}{@{}Y R{5.2cm}@{}}
+    {\sffamily\footnotesize\color{SlateText}\textbf{Material original de referencia:} Carlos Aparicio, Javier Conde, Joaquín Salvachúa, Gabriel Huecas y Andrés Muñoz (DIT-UPM).} &
+    {\sffamily\footnotesize\color{PrimaryDark}\textbf{Edición:} Noviembre 2026}\\
+    {\sffamily\footnotesize\color{MutedGray}Documento técnico elaborado en \LaTeX{} para estudio, consulta y referencia en producción.} &
+    {\sffamily\footnotesize\color{MutedGray}Versión 1.0 --- A4}
+  \end{tabularx}
+\end{minipage}
+\vspace*{0.1cm}
+\end{titlepage}
+
+% ----------------------------------------------------------------------------
+% Prefacio
+% ----------------------------------------------------------------------------
+\chapter*{Prefacio y Guía de Lectura}
+\addcontentsline{toc}{chapter}{Prefacio y Guía de Lectura}
+\markboth{Prefacio}{Prefacio y Guía de Lectura}
+
+El presente manual constituye una ampliación sistemática, profunda y modernizada de la presentación docente \textit{Orquestación y pipelines de datos: Airflow y MLflow}, impartida dentro de la asignatura \textit{Ingeniería Big Data en la Nube} del Grado en Ingeniería y Sistemas de Datos (Departamento de Ingeniería de Sistemas Telemáticos, Universidad Politécnica de Madrid).
+
+Mientras que una presentación de clase de ochenta y seis diapositivas cumple magistralmente la función de introducir el mapa conceptual y despertar las preguntas clave en el aula, el salto a diseñar, desplegar y mantener pipelines reales en entornos productivos exige un nivel de detalle técnico mucho mayor: arquitectura interna de los componentes, gestión segura de credenciales, patrones avanzados de conectividad con decenas de sistemas heterogéneos, control fino de errores y reintentos, y la adaptación de las prácticas de MLOps al nuevo ecosistema dominado por los Grandes Modelos de Lenguaje (LLMs), sistemas RAG y agentes autónomos.
+
+\section*{Objetivos de esta documentación ampliada}
+
+Esta obra persigue tres objetivos complementarios:
+
+\begin{enumerate}
+  \item \textbf{Consolidar y profundizar todos los contenidos de la presentación original.} Cada bloque temático de las diapositivas ---desde el contraste entre procesamiento \textit{streaming} y \textit{batch} o la arquitectura Medallion, hasta los conceptos clave de Airflow, las once fases del ciclo de vida del ML, los \textit{Feature Stores}, la deriva de datos y los cuatro pilares de MLflow--- se desarrolla aquí con rigor formal, diagramas vectoriales, código completo comentando buenas prácticas y advertencias sobre anti-patrones reales. Incluso se señalan constructivamente detalles sutiles presentes en los ejemplos introductorios (como el registro de métricas con \code{log\_param} frente a \code{log\_metric}, la transición de \textit{Stages} a \textit{Aliases} en MLflow Registry o la evaluación sobre métricas de validación en lugar de entrenamiento).
+  \item \textbf{Dominar la conectividad y el ecosistema de conectores en Apache Airflow.} En la práctica profesional, el valor de Airflow no reside en ejecutar scripts Python aislados, sino en coordinar de forma segura, idempotente y escalable bases de datos relacionales, almacenes analíticos (\textit{Data Warehouses}), almacenamiento de objetos multi-cloud, APIs externas, clústeres Spark, proyectos dbt, contenedores Kubernetes, brókeres Kafka y plataformas de linaje y alertas. Los capítulos 4 y 5 diseccionan la arquitectura de \textit{Providers}, \textit{Connections}, \textit{Secrets Backends}, \textit{Hooks}, \textit{Deferrable Operators}, \code{ObjectStoragePath} y \code{SQLExecuteQueryOperator}, culminando con una guía completa para construir, empaquetar y probar un conector propio desde cero.
+  \item \textbf{Modernizar el bloque de MLOps hacia MLflow 3, LLMOps y Prompt Engineering científico.} La irrupción de los LLMs ha transformado el flujo de experimentación: hoy tan crítico como ajustar los hiperparámetros de un \textit{Random Forest} es versionar plantillas de \textit{prompts}, trazar cadenas RAG y llamadas a herramientas, evaluar respuestas no deterministas mediante jueces LLM (\textit{LLM-as-a-Judge}), optimizar instrucciones automáticamente con algoritmos como DSPy o GEPA, gobernar el acceso multi-proveedor mediante un \textit{AI Gateway} y desplegar agentes mediante interfaces estandarizadas como \code{ResponsesAgent}. Los capítulos 8 y 9 abordan este salto tecnológico en profundidad, y el capítulo 10 cierra el círculo integrando Airflow y MLflow en dos arquitecturas productivas completas: una de MLOps tabular y otra de LLMOps/RAG.
+\end{enumerate}
+
+\section*{Convenciones tipográficas y cajas editoriales}
+
+A lo largo del manual se emplean cuatro tipos de recuadros destacados para facilitar tanto la lectura secuencial como la consulta rápida en el día a día profesional:
+
+\begin{infobox}[Concepto clave]
+Resume principios arquitectónicos fundamentales, invariantes teóricos o definiciones formales que conviene interiorizar antes de avanzar.
+\end{infobox}
+
+\begin{warningbox}[Anti-patrón y advertencia de producción]
+Identifica errores habituales en proyectos reales (por ejemplo, serializar grandes volúmenes en XComs, sensores bloqueando \textit{worker slots}, fugas de datos o \textit{training-serving skew}) y explica cómo evitarlos.
+\end{warningbox}
+
+\begin{modernbox}[Modernización 2025--2026 (Airflow 3 y MLflow 3)]
+Contrasta prácticas heredadas de Airflow 2.x o MLflow 2.x con las APIs y arquitecturas introducidas recientemente (Task SDK, DAG Versioning, Assets, Prompt Registry, Tracing nativo, \code{mlflow.genai.evaluate}, \code{ResponsesAgent} y Aliases).
+\end{modernbox}
+
+\begin{examplebox}[Caso práctico de ingeniería]
+Presenta escenarios completos inspirados en sistemas reales, con decisiones de diseño justificadas, código ejecutable y análisis de compromisos (\textit{trade-offs}).
+\end{examplebox}
+
+\section*{Mapa de correspondencia con la presentación original}
+
+La Tabla~\ref{tab:mapa-slides} permite localizar rápidamente en qué capítulo se desarrolla y amplía cada bloque de la presentación original de 86 diapositivas, así como los capítulos que introducen material nuevo de modernización y conectividad.
+
+\begin{table}[htbp]
+\centering
+\caption{Correspondencia entre las diapositivas originales y los capítulos de este manual.}
+\label{tab:mapa-slides}
+\small
+\begin{tabularx}{\textwidth}{@{}C{1.4cm} L{4.6cm} C{2.3cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Cap.} &
+\textcolor{white}{\sffamily\bfseries Título del capítulo} &
+\textcolor{white}{\sffamily\bfseries Diapositivas} &
+\textcolor{white}{\sffamily\bfseries Ampliaciones principales} \\
+\midrule
+1 & Paradigmas y Fundamentos de Orquestación & Slides 1--20 & Streaming/Batch avanzado, Lambda/Kappa, Medallion detallada, 7 pilares productivos, comparativa 2026. \\
+\rowcolor{TableStripe}
+2 & Arquitectura de Airflow y Evolución a Airflow 3 & Slides 21--24 & Anatomía interna, ejecutores (Celery, K8s, Edge), Docker/Helm, Airflow 3.0 (Task SDK, API, Assets, Versioning). \\
+3 & Diseño de DAGs, TaskFlow y Patrones Avanzados & Slides 25--38, 41 & XCom Backends, idempotencia SQL, Jinja, backfills, Dynamic Task Mapping, Setup/Teardown, testing con pytest. \\
+\rowcolor{TableStripe}
+4 & Arquitectura de Conectividad en Airflow & Slides 27, 39--40 & Providers, Connections (URI/JSON), Secrets Backends (Vault, AWS/GCP/Azure), Hooks, Triggers y Deferrable Ops. \\
+5 & Catálogo Práctico de Conectores por Dominio & \textit{Nuevo (ampliación)} & \code{common.sql}, \code{ObjectStoragePath}, REST/OAuth2, Spark, dbt/Cosmos, K8sPodOperator, Kafka, OpenLineage, Custom Provider. \\
+\rowcolor{TableStripe}
+6 & Fundamentos de MLOps y Ciclo de Vida del ML & Slides 42--62 & Deuda técnica (Sculley), 11 etapas completas, Feature Stores (Feast), formulación matemática de Drift (PSI, KS). \\
+7 & MLflow Clásico: Tracking, Models y Registry & Slides 63--83 & Arquitectura remota PG+S3, autolog vs. manual, \code{pyfunc}, Aliases vs. Stages, despliegues progresivos, CI/CD ML. \\
+\rowcolor{TableStripe}
+8 & Prompt Engineering y Prompt Registry en MLflow & \textit{Nuevo (LLMOps)} & Experimentación científica de prompts, \code{mlflow.genai.register\_prompt}, versionado, optimización DSPy/GEPA, Pareto. \\
+9 & Tracing, Evaluación LLM/RAG, Agentes y Gateway & \textit{Nuevo (MLflow 3)} & OpenTelemetry Tracing, \code{mlflow.genai.evaluate}, LLM-as-a-Judge, RAG, Models from Code, \code{ResponsesAgent}, AI Gateway. \\
+\rowcolor{TableStripe}
+10 & Integración End-to-End: Airflow + MLflow & Slides 84--86 & Dos arquitecturas productivas completas (MLOps tabular + LLMOps/RAG) y stack de referencia Docker/K8s. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\cleardoublepage

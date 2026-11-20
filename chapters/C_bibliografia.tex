@@ -1,0 +1,102 @@
+% ============================================================================
+% C_bibliografia.tex — Apéndice C: Bibliografía y Recursos Recomendados
+% ============================================================================
+
+\chapter[Bibliografía y Recursos]{Bibliografía y Recursos Recomendados}\label{app:bibliografia}
+
+Esta bibliografía comentada reúne por bloques temáticos las obras fundacionales, artículos científicos, especificaciones oficiales y recursos docentes que sustentan el manual, integrando todas las referencias de la asignatura (Diapositivas~41 y~83) junto a la literatura clave de Airflow~3, MLflow~3 y LLMOps en 2025--2026.
+
+% ============================================================================
+\section{Libros de referencia canónica}\label{sec:bib-libros}
+% ============================================================================
+
+{\small
+\begin{itemize}[itemsep=3pt, topsep=3pt]
+  \item \textbf{Huyen, Chip (2022).} \textit{Designing Machine Learning Systems: An Iterative Process for Production-Ready Applications}. O'Reilly Media.
+  Referencia canónica de MLOps (Diapositiva~83): ingeniería de datos para ML, \textit{Feature Stores}, \textit{data/concept drift}, evaluación continua, despliegues progresivos e infraestructura de servicio.
+
+  \item \textbf{Huyen, Chip (2025).} \textit{AI Engineering: Building Applications with Foundation Models}. O'Reilly Media.
+  Referencia moderna para ingeniería de aplicaciones LLM: metodología de evaluación (\textit{LLM-as-a-Judge}), \textit{prompt engineering} sistemático, RAG en producción, agentes con herramientas y optimización de latencia y coste.
+
+  \item \textbf{Burkov, Andriy (2020).} \textit{Machine Learning Engineering}. True Positive Inc.
+  Complemento pragmático a Huyen (Diapositiva~83), enfocado en prevención de fuga de datos, validación estadística, ingeniería de características y puesta en producción de modelos supervisados.
+
+  \item \textbf{Harenslak, Bas P., \& de Ruiter, Julian Rutger (2021).} \textit{Data Pipelines with Apache Airflow}. Manning Publications.
+  Tratado completo de Apache Airflow: arquitectura interna, idempotencia, desarrollo de operadores y \textit{Hooks} propios, pruebas con \pkg{pytest}, despliegue en Kubernetes y gobierno multi-equipo.
+
+  \item \textbf{Reis, Joe, \& Housley, Matt (2022).} \textit{Fundamentals of Data Engineering: Plan and Build Robust Data Systems}. O'Reilly Media.
+  Marco integral sobre el ciclo de vida de los datos, procesamiento \textit{batch} vs. \textit{streaming}, arquitectura Medallion, contratos de datos, linaje y selección objetiva de orquestadores.
+
+  \item \textbf{Gift, Noah, \& Deza, Alfredo (2021).} \textit{Practical MLOps: Operationalizing Machine Learning Models}. O'Reilly Media.
+  Guía aplicada a automatización CI/CD para ML, empaquetado en contenedores y operación reproducible en la nube.
+\end{itemize}
+}
+
+% ============================================================================
+\section{Artículos científicos y técnicos fundamentales}\label{sec:bib-papers}
+% ============================================================================
+
+{\small
+\begin{itemize}[itemsep=3pt, topsep=3pt]
+  \item \textbf{Sculley, D., Holt, G., Golovin, D., et al. (2015).} \textit{Hidden Technical Debt in Machine Learning Systems}. Advances in Neural Information Processing Systems (NeurIPS~28), pp.~2503--2511.
+  Artículo seminal de MLOps que expone cómo el código del modelo es solo una pequeña parte frente a la infraestructura de datos, configuración, validación y monitorización.
+
+  \item \textbf{Zaharia, Matei, Chen, Andrew, Davidson, Aaron, et al. (2018).} \textit{Accelerating the Machine Learning Lifecycle with MLflow}. IEEE Data Engineering Bulletin, 41(4), pp.~39--45.
+  Diseño abierto y \textit{API-first} de MLflow y su separación en Tracking, Projects, Models y Registry.
+
+  \item \textbf{Lewis, Patrick, Perez, Ethan, Piktus, Aleksandra, et al. (2020).} \textit{Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks}. Advances in Neural Information Processing Systems (NeurIPS~33).
+  Formalización fundacional del paradigma RAG combinando recuperación vectorial y generación condicionada.
+
+  \item \textbf{Zheng, Lianmin, Chiang, Wei-Lin, Sheng, Ying, et al. (2023).} \textit{Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena}. NeurIPS~36 Datasets and Benchmarks Track.
+  Análisis riguroso de jueces LLM frente a evaluadores humanos, sus sesgos sistemáticos (posición, verbosidad, auto-preferencia) y medidas de calibración aplicables en \code{mlflow.genai.evaluate()}.
+
+  \item \textbf{Khattab, Omar, Singhvi, Arnav, Maheshwari, Paridhi, et al. (2024).} \textit{DSPy: Compiling Declarative Language Model Calls into Self-Improving Pipelines}. ICLR~2024.
+  Propone programar y compilar pipelines LLM con firmas tipadas y optimizadores automáticos de \textit{prompts}.
+
+  \item \textbf{Es, Shahul, James, Jithin, Espinosa-Anke, Luis, \& Schockaert, Steven (2024).} \textit{RAGAS: Automated Evaluation of Retrieval Augmented Generation}. EACL~2024 System Demonstrations, pp.~150--158.
+  Define métricas automatizadas clave para RAG (\textit{faithfulness / groundedness}, \textit{answer relevance}, \textit{context recall/precision}).
+
+  \item \textbf{Agrawal, Lakshya A., Tan, Shangyin, Soylu, Dilara, et al. (2025).} \textit{GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning}. arXiv:2507.19457.
+  Algoritmo evolutivo reflexivo multiobjetivo en frontera de Pareto adoptado en DSPy y MLflow~3 para optimizar \textit{prompts} a partir de trazas de ejecución.
+\end{itemize}
+}
+
+% ============================================================================
+\section{Documentación oficial y especificaciones técnicas}\label{sec:bib-docs}
+% ============================================================================
+
+{\small
+\begin{itemize}[itemsep=2.5pt, topsep=3pt]
+  \item \textbf{Apache Airflow 2.10 y 3.0+ --- Documentación oficial (Diapositiva~41):} arquitectura, Task SDK, Assets, DAG Versioning y guía de migración. \url{https://airflow.apache.org/docs/}
+
+  \item \textbf{Apache Airflow Providers, Operators and Hooks Reference (Diapositiva~41):} catálogo oficial de conectores, \textit{Hooks} y operadores diferibles. \url{https://airflow.apache.org/docs/apache-airflow-providers/operators-and-hooks-ref/index.html}
+
+  \item \textbf{MLflow 3 y MLflow GenAI --- Documentación oficial (Diapositiva~83):} Tracking, Prompt Registry, Tracing OTel, \code{mlflow.genai.evaluate}, \code{ResponsesAgent} y AI Gateway. \url{https://mlflow.org/docs/latest/index.html} y \url{https://mlflow.org/docs/latest/genai/}
+
+  \item \textbf{MLflow Model Registry y Autologging (Diapositiva~83):} gobierno por \textit{Aliases} y captura automática. \url{https://mlflow.org/docs/latest/model-registry.html} y \url{https://mlflow.org/docs/latest/tracking/autolog.html}
+
+  \item \textbf{Feast --- Open-Source Feature Store (Diapositiva~83):} gestión consistente de características \textit{offline}/\textit{online}. \url{https://feast.dev/}
+
+  \item \textbf{Great Expectations y Pandera:} contratos y validación declarativa de datos en Python. \url{https://docs.greatexpectations.io/} y \url{https://pandera.readthedocs.io/}
+
+  \item \textbf{OpenLineage y OpenTelemetry GenAI SemConv:} estándares abiertos de linaje de datos y trazabilidad semántica LLM. \url{https://openlineage.io/docs/} y \url{https://opentelemetry.io/docs/specs/semconv/gen-ai/}
+
+  \item \textbf{Astronomer Cosmos:} ejecución nativa de proyectos dbt como \code{TaskGroups} de Airflow. \url{https://astronomer.github.io/astronomer-cosmos/}
+\end{itemize}
+}
+
+% ============================================================================
+\section{Cursos, tutoriales y material docente original}\label{sec:bib-cursos}
+% ============================================================================
+
+{\small
+\begin{itemize}[itemsep=2.5pt, topsep=3pt]
+  \item \textbf{Material docente original (DIT -- UPM):} Aparicio, Carlos; Conde, Javier; Salvachúa, Joaquín; Huecas, Gabriel; \& Muñoz, Andrés. \textit{Orquestación y pipelines de datos: Airflow y MLflow}. Asignatura \textit{Ingeniería Big Data en la Nube}, Grado en Ingeniería y Sistemas de Datos, Departamento de Ingeniería de Sistemas Telemáticos (DIT), Universidad Politécnica de Madrid.
+
+  \item \textbf{Tutorial completo de Apache Airflow en vídeo (Diapositiva~41):} recorrido práctico desde instalación local hasta DAGs, conexiones y Docker. \url{https://www.youtube.com/watch?v=K9AnJ9_ZAXE}
+
+  \item \textbf{Curso práctico en Udemy (Diapositiva~41):} \textit{The Complete Hands-On Introduction to Apache Airflow} (Marc Lamberti), centrado en TaskFlow, XComs, sensores y producción. \url{https://www.udemy.com/course/apache-airflow-course/}
+
+  \item \textbf{Astronomer Learn:} guías técnicas actualizadas sobre Airflow~3, \textit{Assets}, \code{ObjectStoragePath} y patrones de arquitectura. \url{https://www.astronomer.io/docs/learn/}
+\end{itemize}
+}

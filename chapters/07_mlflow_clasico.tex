@@ -1,0 +1,1003 @@
+% ============================================================================
+% 07_mlflow_clasico.tex — Capítulo 7: MLflow Clásico (Tracking, Models, Registry)
+% ============================================================================
+
+\chapter[MLflow Clásico: Tracking, Models y Registry]{MLflow Clásico: Tracking, Projects, Models, Model Registry y Despliegue}\label{chap:mlflow-clasico}
+
+En el Capítulo~\ref{chap:mlops-ciclo-vida} establecimos que la reproducibilidad en aprendizaje automático depende de versionar simultáneamente código, datos, hiperparámetros y entorno, así como de gobernar con rigor la transición desde el laboratorio de experimentación hasta el servicio en producción. Sin una plataforma unificada que registre sistemáticamente cada ensayo, empaquete los artefactos bajo un contrato estándar y controle qué versión se encuentra activa en producción, los equipos de datos recaen rápidamente en hojas de cálculo manuales, ficheros \code{modelo\_final\_v3\_definitivo.pkl} y despliegues imposibles de auditar.
+
+\textbf{MLflow}, creado originalmente por Databricks en 2018 y hoy proyecto gobernado bajo la Linux Foundation AI \& Data, se ha consolidado como el estándar \textit{open-source} de facto para cubrir este vacío operativo. En este capítulo diseccionaremos la arquitectura de los cuatro componentes clásicos de MLflow ---\textit{Tracking}, \textit{Projects}, \textit{Models} y \textit{Model Registry}---, profundizaremos en su despliegue productivo remoto, analizaremos patrones avanzados de experimentación, empaquetado \code{pyfunc} y gobernanza moderna basada en \textit{Aliases}, y cerraremos el ciclo con el servicio de inferencia, las estrategias de despliegue progresivo y los pipelines CI/CD/CT para ML.
+
+% ============================================================================
+\section[Arquitectura de MLflow y componentes]{Visión arquitectónica de MLflow y los cuatro componentes clásicos}\label{sec:mlflow-arquitectura}
+% ============================================================================
+
+\subsection{Filosofía \textit{API-first}, neutralidad tecnológica y los cuatro pilares}
+
+El éxito sostenido de MLflow frente a soluciones propietarias fuertemente acopladas a una única nube o framework responde a dos principios fundacionales de diseño:
+
+\begin{itemize}
+  \item \textbf{\textit{Language-agnostic} y \textit{Framework-agnostic}:} en lugar de imponer un lenguaje de modelado o un motor de entrenamiento, MLflow expone una interfaz REST abierta (respaldada por SDKs oficiales en Python, R, Java y TypeScript) e integra de forma nativa con prácticamente todo el ecosistema de ciencia de datos: \pkg{scikit-learn}, \pkg{PyTorch}, \pkg{TensorFlow/Keras}, \pkg{XGBoost}, \pkg{LightGBM}, \pkg{CatBoost}, \pkg{Spark ML}, \pkg{ONNX}, \pkg{Hugging Face Transformers} y modelos arbitrarios en Python.
+  \item \textbf{Modularidad y arquitectura \textit{API-first}:} sus componentes están débilmente acoplados y pueden adoptarse incrementalmente. Un equipo puede comenzar utilizando únicamente el servidor de \textit{Tracking} en sus scripts actuales y activar progresivamente el empaquetado \textit{Models}, el \textit{Model Registry} y la contenerización con Docker o Kubernetes sin reescribir su código de entrenamiento.
+\end{itemize}
+
+Tradicionalmente, MLflow se ha estructurado en torno a \textbf{cuatro pilares complementarios}:
+
+\begin{enumerate}
+  \item \textbf{MLflow Tracking:} cuaderno de laboratorio programático y centralizado para registrar ejecuciones (\textit{runs}) agrupadas en experimentos, capturando hiperparámetros, series temporales de métricas, etiquetas, linaje de datasets, código fuente y artefactos binarios (modelos, gráficas, informes).
+  \item \textbf{MLflow Projects:} especificación declarativa (\code{MLproject}) para empaquetar código de ciencia de datos junto con sus dependencias y puntos de entrada parametrizados, permitiendo reejecutar un flujo de entrenamiento de forma reproducible en local, en un servidor remoto o en Kubernetes.
+  \item \textbf{MLflow Models:} formato de empaquetado estandarizado y \textit{multi-flavor} que desacopla el framework de entrenamiento del entorno de inferencia. Un mismo artefacto puede cargarse con su librería nativa o a través de la interfaz genérica \code{pyfunc} para servirse como API REST, imagen Docker, función distribuida en Spark o endpoint gestionado en la nube.
+  \item \textbf{MLflow Model Registry:} repositorio central de gobierno y gestión de lanzamientos (\textit{release management}) que asigna versiones inmutables a los modelos aprobados, asocia alias de despliegue (\code{@champion}, \code{@challenger}), almacena etiquetas de auditoría y mantiene trazabilidad completa hacia el experimento que los generó.
+\end{enumerate}
+
+\begin{modernbox}[Evolución hacia MLflow 3: expansión nativa a GenAI y \code{LoggedModel}]
+\badge[PrimaryAccent]{MLflow 3} Aunque los cuatro pilares clásicos siguen siendo la columna vertebral del ML tabular y del \textit{Deep Learning} tradicional, la irrupción de la inteligencia artificial generativa ha impulsado en \textbf{MLflow 3} (2025--2026) una expansión arquitectónica profunda que abordaremos en los Capítulos~8 y~9: \textbf{Prompt Registry} para versionar y comparar plantillas de \textit{prompts}, \textbf{MLflow Tracing} compatible con OpenTelemetry para inspeccionar cadenas RAG y agentes, evaluación automatizada \code{mlflow.genai.evaluate} con jueces LLM, el interfaz \code{ResponsesAgent}, un \textbf{AI Gateway} multi-proveedor y la promoción de \code{LoggedModel} a entidad de primera clase independiente de las \textit{runs} individuales.
+\end{modernbox}
+
+\subsection{Tracking frente a Model Registry: audiencias, entidades y flujos}
+
+Una fuente recurrente de confusión en equipos que adoptan MLflow consiste en mezclar las responsabilidades del servidor de Tracking con las del Model Registry ---por ejemplo, desplegando producción directamente contra un identificador de ejecución \code{runs:/9a8b7c.../model} en lugar de un modelo registrado---. Como subraya la Tabla~\ref{tab:tracking-vs-registry}, ambos componentes sirven a audiencias, ritmos y objetivos radicalmente distintos.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa estructural entre MLflow Tracking y MLflow Model Registry.}
+\label{tab:tracking-vs-registry}
+\small
+\begin{tabularx}{\textwidth}{@{}L{3.1cm} Y Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Dimensión} &
+\textcolor{white}{\sffamily\bfseries MLflow Tracking} &
+\textcolor{white}{\sffamily\bfseries MLflow Model Registry} \\
+\midrule
+Pregunta central que responde &
+«¿Qué experimentos he ejecutado, con qué hiperparámetros y qué resultados obtuve?» &
+«¿Qué modelos están aprobados, cuál es su versión actual y qué alias está sirviendo en producción?» \\
+\rowcolor{TableStripe}
+Audiencia principal &
+Científicos de datos e investigadores ML durante exploración y ajuste. &
+Ingenieros de ML (MLE), ingenieros de plataforma, SRE y auditores de gobierno. \\
+Metáfora operativa &
+Cuaderno de laboratorio científico (\textit{lab notebook}). &
+Sistema de gestión de lanzamientos (\textit{release management} / catálogo de producción). \\
+\rowcolor{TableStripe}
+Entidades de dominio &
+\code{Experiment}, \code{Run}, \code{Param}, \code{Metric}, \code{Tag}, \code{Artifact}, \code{DatasetInput}. &
+\code{RegisteredModel}, \code{ModelVersion}, \code{Alias} (\code{@champion}), \code{GovernanceTag}, anotaciones. \\
+Volumen y señal/ruido &
+Miles o decenas de miles de ejecuciones (muchas fallidas o exploratorias). &
+Decenas de versiones curadas que han superado \textit{quality gates} estrictos. \\
+\rowcolor{TableStripe}
+Integración en despliegue &
+Nunca debe apuntarse desde producción (acopla el servicio a un \code{run\_id} efímero). &
+Fuente única para servir modelos mediante URI desacoplada (\code{models:/nombre@alias}). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Arquitectura de despliegue: modo local frente a producción remota}
+
+MLflow distingue estrictamente entre dos almacenes lógicos: el \textbf{Backend Store}, que persiste metadatos estructurados y ligeros (experimentos, \textit{runs}, parámetros, métricas, etiquetas y versiones del Registry), y el \textbf{Artifact Store}, que almacena objetos binarios potencialmente grandes (pesos de modelos de varios gigabytes, gráficos, perfiles de datos).
+
+En desarrollo local individual, ejecutar \code{mlflow ui} sin configuración adicional utiliza el sistema de ficheros local (\code{./mlruns/}) como almacén simultáneo de metadatos y artefactos (o una base SQLite local \code{sqlite:///mlflow.db} si se habilita el Model Registry). Este modo es excelente para prototipado rápido, pero \textbf{inviable para equipos}: carece de concurrencia segura, alta disponibilidad, control de acceso y compartición entre nodos de entrenamiento y clústeres de despliegue.
+
+En producción se despliega una \textbf{arquitectura remota desacoplada} (Figura~\ref{fig:mlflow-arquitectura-remota}):
+\begin{itemize}
+  \item \textbf{Reverse Proxy y capa de autenticación:} Nginx, Envoy o un Ingress de Kubernetes termina el cifrado TLS e integra autenticación corporativa (OAuth2/OIDC, SSO o el plugin de autenticación RBAC nativo de MLflow) para controlar quién puede registrar modelos o mover el alias \code{@champion}.
+  \item \textbf{MLflow Tracking Server (\textit{stateless}):} una o varias réplicas detrás del balanceador sirviendo la interfaz web y la API REST con múltiples \textit{workers} Gunicorn/Uvicorn. Al no mantener estado en disco local, escala horizontalmente sin fricción.
+  \item \textbf{Backend Store relacional:} PostgreSQL (recomendado en producción por su robustez transaccional, respaldo gestionado tipo RDS/Cloud SQL y migraciones Alembic) o MySQL.
+  \item \textbf{Artifact Store de objetos:} Amazon S3, Google Cloud Storage, Azure Blob Storage o MinIO \textit{on-premise}. Una decisión arquitectónica clave es activar el modo \textbf{\textit{Proxied Artifact Access}} (\code{--serve-artifacts}): en este modo, los clientes nunca necesitan credenciales directas de S3 ni políticas IAM locales; suben y descargan artefactos a través del propio Tracking Server, que actúa como intermediario autenticado y centraliza la auditoría de acceso.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.8cm and 1.0cm]
+  % Clientes (izquierda)
+  \node[archbox, minimum width=3.1cm, minimum height=0.85cm, text width=2.9cm] (cli_nb) at (0, 4.4)
+    {Notebooks / IDE\\{\normalfont\scriptsize Data Scientists}};
+  \node[tealbox, minimum width=3.1cm, minimum height=0.85cm, text width=2.9cm] (cli_af) at (0, 2.7)
+    {Workers Airflow\\{\normalfont\scriptsize Reentrenamiento CT}};
+  \node[amberbox, minimum width=3.1cm, minimum height=0.85cm, text width=2.9cm] (cli_ci) at (0, 1.0)
+    {Runners CI/CD\\{\normalfont\scriptsize GitHub Actions}};
+
+  % Proxy / Auth
+  \node[darkbox, minimum width=2.4cm, minimum height=3.8cm, text width=2.1cm] (proxy) at (4.1, 2.7)
+    {Reverse Proxy\\\& Auth\\{\normalfont\scriptsize TLS / OIDC}\\{\normalfont\scriptsize RBAC / Ingress}};
+
+  % Tracking Server Cluster (stateless)
+  \node[archbox, minimum width=3.5cm, minimum height=1.25cm, text width=3.2cm] (srv1) at (8.2, 3.65)
+    {Tracking Server \#1\\{\normalfont\scriptsize REST API + UI}\\{\normalfont\scriptsize \code{--serve-artifacts}}};
+  \node[archbox, minimum width=3.5cm, minimum height=1.25cm, text width=3.2cm] (srv2) at (8.2, 1.75)
+    {Tracking Server \#2\\{\normalfont\scriptsize Stateless (Gunicorn)}\\{\normalfont\scriptsize Alta disponibilidad}};
+
+  \begin{scope}[on background layer]
+    \node[groupbox, fit=(srv1)(srv2), inner sep=9pt,
+          label={[font=\sffamily\scriptsize\bfseries, text=PrimaryDark]above:Clúster MLflow (Kubernetes)}] (mlcluster) {};
+  \end{scope}
+
+  % Almacenes persistentes (derecha superior e inferior)
+  \node[dbnode, minimum width=2.9cm, minimum height=1.35cm, fill=InfoBg] (pg) at (13.3, 4.15)
+    {Backend Store\\{\normalfont\scriptsize PostgreSQL}\\{\normalfont\tiny Runs, Metrics, Registry}};
+
+  \node[dbnode, draw=TealAccent, fill=ModernBg, minimum width=2.9cm, minimum height=1.35cm] (s3) at (13.3, 1.45)
+    {Artifact Store\\{\normalfont\scriptsize S3 / GCS / MinIO}\\{\normalfont\tiny Modelos, Gráficas, ONNX}};
+
+  % Clúster de Serving (abajo derecha con espacio amplio)
+  \node[amberbox, minimum width=4.8cm, minimum height=1.05cm, text width=4.6cm] (serving) at (10.7, -1.05)
+    {Clúster de Inferencia\\{\normalfont\scriptsize KServe / FastAPI / SageMaker}\\{\normalfont\scriptsize Carga \code{models:/fraude@champion}}};
+
+  % Conexiones
+  \draw[flowarrow] (cli_nb.east) -- (proxy.west |- cli_nb.east);
+  \draw[tealarrow] (cli_af.east) -- (proxy.west);
+  \draw[flowarrow, color=AmberAccent] (cli_ci.east) -- (proxy.west |- cli_ci.east);
+
+  \draw[flowarrow] (proxy.east) -- ++(0.45, 0) |- (srv1.west);
+  \draw[flowarrow] (proxy.east) -- ++(0.45, 0) |- (srv2.west);
+
+  \draw[flowarrow] (srv1.east) -- node[elabel, above, sloped] {SQLAlchemy} (pg.west);
+  \draw[flowarrow] (srv2.east) -- (pg.south west);
+
+  \draw[tealarrow] (srv1.south east) -- (s3.north west);
+  \draw[tealarrow] (srv2.east) -- node[elabel, below, sloped] {Artifact Proxy} (s3.west);
+
+  % Serving lee metadata del clúster Tracking y descarga binario del Artifact Store
+  \draw[dashedarrow, color=AmberAccent] (serving.north -| mlcluster.south) -- node[elabel, midway, left] {Resuelve URI} (mlcluster.south);
+  \draw[tealarrow] (s3.south) |- node[elabel, pos=0.28, right] {Descarga artefacto} (serving.east);
+\end{tikzpicture}%
+}
+\caption{Arquitectura productiva remota de MLflow: capa de acceso segura con TLS/OIDC, réplicas sin estado del Tracking Server con proxy de artefactos, persistencia transaccional de metadatos en PostgreSQL y almacenamiento escalable de binarios en S3/GCS/MinIO.}
+\label{fig:mlflow-arquitectura-remota}
+\end{figure}
+
+El Listado~\ref{lst:mlflow-server-prod} muestra el comando de arranque típico del servidor MLflow en producción (ejecutado dentro de un contenedor Docker o un \textit{Deployment} de Kubernetes con las credenciales inyectadas mediante secretos de entorno).
+
+\begin{lstlisting}[style=bash, caption={Despliegue de un MLflow Tracking Server de producción respaldado por PostgreSQL y almacenamiento S3 en modo proxied artifacts.}, label={lst:mlflow-server-prod}]
+export MLFLOW_BACKEND_URI="postgresql+psycopg2://mlflow_user:${DB_PASS}@pg-mlops.internal:5432/mlflow_db"
+export MLFLOW_ARTIFACT_DEST="s3://corp-mlops-artifacts-prod/mlflow"
+
+mlflow server \
+  --host 0.0.0.0 \
+  --port 5000 \
+  --workers 4 \
+  --backend-store-uri "${MLFLOW_BACKEND_URI}" \
+  --artifacts-destination "${MLFLOW_ARTIFACT_DEST}" \
+  --serve-artifacts \
+  --gunicorn-opts "--timeout 120 --keep-alive 5"
+\end{lstlisting}
+
+% ============================================================================
+\section[MLflow Tracking en profundidad]{MLflow Tracking en profundidad: del script baseline a la experimentación profesional}\label{sec:mlflow-tracking}
+% ============================================================================
+
+\subsection{Configuración local y anatomía interna del directorio \code{mlruns/}}
+
+Para experimentar localmente basta crear un entorno virtual aislado, instalar las librerías de modelado junto con \pkg{mlflow} y levantar la interfaz web en el puerto \code{5000}:
+
+\begin{lstlisting}[style=bash, caption={Inicialización de entorno virtual limpio y arranque de la interfaz local de MLflow.}, label={lst:mlflow-setup-local}]
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install --upgrade pip
+pip install scikit-learn pandas numpy matplotlib optuna mlflow
+pip freeze > requirements.txt
+
+# Levanta la interfaz web en http://localhost:5000
+mlflow ui --host 127.0.0.1 --port 5000
+\end{lstlisting}
+
+Cuando trabajamos contra el almacenamiento local por defecto (\code{file:./mlruns}), MLflow materializa su modelo de datos jerárquico directamente en el sistema de ficheros. Comprender esta anatomía ---presentada en el Listado~\ref{lst:mlruns-anatomia}--- resulta muy útil para depurar problemas de rutas, entender cómo persiste cada tipo de entidad y limpiar artefactos huérfanos mediante \code{mlflow gc}.
+
+\begin{lstlisting}[style=bash, caption={Anatomía real del directorio mlruns/ en modo FileStore local.}, label={lst:mlruns-anatomia}]
+mlruns/
+|-- .trash/                        # Papelera de borrado logico (eliminable con `mlflow gc`)
+|-- 0/                             # Experimento "Default" creado automaticamente
+|   `-- meta.yaml
+|-- 939015357905926970/            # ID numerico de un experimento personalizado
+|   |-- meta.yaml                  # Nombre, artifact_location y lifecycle_stage
+|   `-- 4f8a2c1e90ab4d3fb2.../     # UUID unico de una ejecucion (Run)
+|       |-- meta.yaml              # start_time, end_time, status, user_id, run_name
+|       |-- params/                # Un fichero de texto por hiperparametro (inmutable)
+|       |   |-- n_estimators       # Contenido plano: "200"
+|       |   `-- max_depth          # Contenido plano: "8"
+|       |-- metrics/               # Un fichero por metrica: "<timestamp_ms> <valor> <step>"
+|       |   |-- val_f1
+|       |   `-- val_roc_auc
+|       |-- tags/                  # Metadatos indexables (mlflow.source.git.commit, owner...)
+|       `-- artifacts/             # Binarios y ficheros arbitrarios de la ejecucion
+|           |-- confusion_matrix.png
+|           `-- random_forest_model/
+|               |-- MLmodel
+|               |-- model.pkl
+|               |-- conda.yaml
+|               |-- python_env.yaml
+|               `-- requirements.txt
+`-- models/                        # Almacen local de modelos registrados / LoggedModels
+\end{lstlisting}
+
+Nótese la diferencia física fundamental entre \code{params/} y \code{metrics/}: mientras cada parámetro es un simple valor escalar de texto, cada métrica guarda una serie temporal de tuplas \code{(timestamp, float\_value, step)}, habilitando curvas de aprendizaje por época y agregaciones numéricas eficientes.
+
+\subsection{Evolución del script baseline a un entrenamiento instrumentado con rigor}
+
+En un proyecto incipiente es habitual partir de un script de línea de comandos de \pkg{scikit-learn} (entrenando por ejemplo un \code{RandomForestClassifier} sobre el conjunto de datos de cáncer de mama de Wisconsin, \code{load\_breast\_cancer}) que imprime sus métricas por consola mediante \code{logging.info(...)}. Sin tracking, cada vez que ejecutamos el script con un nuevo valor de \code{--n\_estimators} o \code{--max\_depth}, el resultado anterior se pierde en el historial del terminal y el modelo entrenado desaparece de memoria al terminar el proceso.
+
+Instrumentar ese script con MLflow requiere únicamente declarar el experimento destino mediante \code{mlflow.set\_experiment}, envolver el entrenamiento en el gestor de contexto \code{mlflow.start\_run()} ---garantizando el cierre limpio incluso ante excepciones--- y registrar los cuatro pilares de reproducibilidad: parámetros, métricas numéricas, linaje del dataset y artefacto del modelo con su firma. El Listado~\ref{lst:mlflow-tracking-profesional} presenta la versión profesional y limpia de dicho script.
+
+\begin{lstlisting}[style=python, caption={Script de entrenamiento profesional con MLflow Tracking: parámetros, métricas numéricas, linaje de dataset, firma y matriz de confusión.}, label={lst:mlflow-tracking-profesional}]
+import argparse
+import logging
+import tempfile
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import mlflow
+import mlflow.data
+import mlflow.sklearn
+from mlflow.models import infer_signature
+from sklearn.datasets import load_breast_cancer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    accuracy_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import train_test_split
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Entrenamiento RandomForest con MLflow")
+    parser.add_argument("--n_estimators", type=int, default=150)
+    parser.add_argument("--max_depth", type=int, default=8)
+    parser.add_argument("--random_state", type=int, default=42)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    dataset_bunch = load_breast_cancer(as_frame=True)
+    df = dataset_bunch.frame
+
+    # Division estratificada y reproducible (evita variaciones entre ejecuciones)
+    train_df, test_df = train_test_split(
+        df, test_size=0.25, random_state=args.random_state, stratify=df["target"]
+    )
+    x_train, y_train = train_df.drop(columns=["target"]), train_df["target"]
+    x_test, y_test = test_df.drop(columns=["target"]), test_df["target"]
+
+    mlflow.set_experiment("breast_cancer_classification")
+
+    with mlflow.start_run(run_name=f"rf_est{args.n_estimators}_d{args.max_depth}") as run:
+        # 1. Etiquetas de gobernanza y linaje de datos
+        mlflow.set_tags({
+            "team": "ml-platform",
+            "algorithm": "RandomForestClassifier",
+            "dataset_name": "sklearn_breast_cancer",
+        })
+        train_input = mlflow.data.from_pandas(
+            train_df, name="breast_cancer_train", targets="target"
+        )
+        mlflow.log_input(train_input, context="training")
+
+        # 2. Hiperparametros de entrada (siempre con log_params)
+        params = {
+            "n_estimators": args.n_estimators,
+            "max_depth": args.max_depth,
+            "random_state": args.random_state,
+            "test_size": 0.25,
+        }
+        mlflow.log_params(params)
+
+        # 3. Entrenamiento e inferencia sobre holdout
+        model = RandomForestClassifier(
+            n_estimators=args.n_estimators,
+            max_depth=args.max_depth,
+            random_state=args.random_state,
+            n_jobs=-1,
+        )
+        model.fit(x_train, y_train)
+        preds = model.predict(x_test)
+        probs = model.predict_proba(x_test)[:, 1]
+
+        # 4. Metricas numericas de evaluacion (SIEMPRE con log_metrics, nunca log_param)
+        metrics = {
+            "test_accuracy": float(accuracy_score(y_test, preds)),
+            "test_precision": float(precision_score(y_test, preds)),
+            "test_recall": float(recall_score(y_test, preds)),
+            "test_f1": float(f1_score(y_test, preds)),
+            "test_roc_auc": float(roc_auc_score(y_test, probs)),
+        }
+        mlflow.log_metrics(metrics)
+
+        # 5. Artefacto visual: matriz de confusion
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ConfusionMatrixDisplay.from_predictions(y_test, preds, ax=ax, cmap="Blues")
+        ax.set_title("Matriz de confusion (Holdout)")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fig_path = Path(tmpdir) / "confusion_matrix.png"
+            fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            mlflow.log_artifact(str(fig_path), artifact_path="plots")
+
+        # 6. Empaquetado del modelo con firma estricta y ejemplo de entrada
+        signature = infer_signature(x_train, model.predict(x_train))
+        mlflow.sklearn.log_model(
+            sk_model=model,
+            artifact_path="random_forest_model",
+            signature=signature,
+            input_example=x_train.head(3),
+        )
+        logger.info("Run %s finalizada | F1=%.4f | ROC-AUC=%.4f",
+                    run.info.run_id, metrics["test_f1"], metrics["test_roc_auc"])
+
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+
+\begin{warningbox}[Error clásico en código introductorio: registrar métricas con \code{log\_param} en lugar de \code{log\_metric}]
+En tutoriales rápidos y código introductorio (como el ejemplo inicial de la diapositiva~72 de la presentación original) aparece con frecuencia un anti-patrón muy instructivo:
+\begin{center}
+\code{mlflow.log\_param("accuracy", accuracy)} \quad en lugar de \quad \code{mlflow.log\_metric("accuracy", accuracy)}
+\end{center}
+Aunque el script ejecuta sin lanzar errores, almacenar métricas de evaluación como parámetros rompe cuatro capacidades esenciales de MLflow:
+\begin{enumerate}
+  \item \textbf{Tipo de dato y ordenación incorrectos:} los parámetros se almacenan como \textbf{cadenas de texto inmutables}; ordenar descendentemente en la UI puede producir orden lexicográfico erróneo y los filtros numéricos en la barra de búsqueda (\code{metrics.test\_f1 > 0.92 AND params.n\_estimators = '150'}) dejan de funcionar.
+  \item \textbf{Imposibilidad de trazar gráficas de optimización:} la pestaña \textit{Chart} de la interfaz de MLflow ---donde se comparan cientos de ejecuciones mediante gráficos de \textbf{coordenadas paralelas}, dispersión (\textit{scatter}) e historial de optimización--- solo permite seleccionar \textit{métricas} como eje objetivo o escala de color.
+  \item \textbf{Pérdida de la dimensión temporal (\code{step}):} un parámetro solo puede escribirse una vez por \textit{run} (volver a escribirlo con otro valor lanza \code{MlflowException}), mientras que \code{log\_metric("val\_loss", loss, step=epoch)} registra la evolución completa durante el entrenamiento iterativo.
+  \item \textbf{Ruptura de automatismos CI/CD:} los \textit{quality gates} de Airflow y GitHub Actions inspeccionan \code{run.data.metrics["test\_f1"]} para decidir la promoción al Model Registry; si el valor se registró como parámetro, el diccionario de métricas estará vacío.
+\end{enumerate}
+\textbf{Regla mnemotécnica:} todo lo que controlas \textit{antes} de entrenar (configuración, hiperparámetros, semilla) va a \code{log\_param}; todo lo que mides \textit{durante o después} de entrenar (pérdida, F1, RMSE, latencia) va a \code{log\_metric}.
+\end{warningbox}
+
+\subsection{Tracking avanzado: \textit{runs} anidados con Optuna}
+
+Al realizar optimización bayesiana de hiperparámetros con \pkg{Optuna} se ejecutan decenas o cientos de ensayos (\textit{trials}) por cada estudio. Si cada ensayo se registra como una \textit{run} independiente al mismo nivel, el experimento se satura visualmente y se pierde la relación entre el estudio global y sus intentos individuales.
+
+MLflow resuelve este escenario mediante \textbf{ejecuciones anidadas (\code{nested=True})}: una \textit{run} padre representa el estudio completo de optimización (registrando la estrategia de búsqueda, el mejor conjunto de hiperparámetros, la validación final en \textit{test} y el modelo definitivo), mientras que cada \textit{trial} de Optuna abre una \textit{run} hija colapsable en la interfaz que registra únicamente sus hiperparámetros y su métrica de validación cruzada (sin guardar modelos redundantes por cada ensayo). El Listado~\ref{lst:mlflow-optuna-nested} implementa este patrón completo.
+
+\begin{lstlisting}[style=python, caption={Optimización bayesiana con Optuna integrada con runs anidados (nested=True) en MLflow Tracking.}, label={lst:mlflow-optuna-nested}]
+import mlflow
+import mlflow.sklearn
+import optuna
+from mlflow.models import infer_signature
+from sklearn.datasets import load_breast_cancer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import f1_score, roc_auc_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+def ejecutar_estudio_optuna(n_trials: int = 25) -> str:
+    df = load_breast_cancer(as_frame=True).frame
+    train_df, test_df = train_test_split(
+        df, test_size=0.20, random_state=42, stratify=df["target"]
+    )
+    x_train, y_train = train_df.drop(columns=["target"]), train_df["target"]
+    x_test, y_test = test_df.drop(columns=["target"]), test_df["target"]
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    mlflow.set_experiment("breast_cancer_hpo_optuna")
+
+    with mlflow.start_run(run_name="optuna_tpe_study") as parent_run:
+        mlflow.set_tags({"hpo_framework": "optuna", "sampler": "TPE", "cv_folds": "5"})
+
+        def objective(trial: optuna.Trial) -> float:
+            trial_params = {
+                "n_estimators": trial.suggest_int("n_estimators", 50, 400, step=50),
+                "max_depth": trial.suggest_int("max_depth", 3, 18),
+                "min_samples_split": trial.suggest_int("min_samples_split", 2, 12),
+                "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
+            }
+            # Run hija colapsable bajo la run padre
+            with mlflow.start_run(run_name=f"trial_{trial.number:03d}", nested=True):
+                mlflow.log_params(trial_params)
+                clf = RandomForestClassifier(**trial_params, random_state=42, n_jobs=-1)
+                cv_f1 = float(cross_val_score(clf, x_train, y_train, cv=cv, scoring="f1").mean())
+                mlflow.log_metric("cv_mean_f1", cv_f1)
+                return cv_f1
+
+        study = optuna.create_study(
+            direction="maximize", sampler=optuna.samplers.TPESampler(seed=42)
+        )
+        study.optimize(objective, n_trials=n_trials)
+
+        # Reentrenamiento final con los mejores hiperparametros sobre todo train
+        best_params = study.best_params
+        mlflow.log_params({f"best_{k}": v for k, v in best_params.items()})
+        mlflow.log_metric("best_cv_f1", float(study.best_value))
+
+        final_model = RandomForestClassifier(**best_params, random_state=42, n_jobs=-1)
+        final_model.fit(x_train, y_train)
+        preds = final_model.predict(x_test)
+        probs = final_model.predict_proba(x_test)[:, 1]
+
+        mlflow.log_metrics({
+            "holdout_f1": float(f1_score(y_test, preds)),
+            "holdout_roc_auc": float(roc_auc_score(y_test, probs)),
+        })
+        signature = infer_signature(x_train, final_model.predict(x_train))
+        mlflow.sklearn.log_model(final_model, "best_model", signature=signature)
+        return parent_run.info.run_id
+\end{lstlisting}
+
+\subsection{Autologging frente a Tracking Manual y estrategia híbrida}
+
+MLflow ofrece instrumentación automática mediante \code{mlflow.autolog()} o llamadas específicas por librería (\code{mlflow.sklearn.autolog()}, \code{mlflow.pytorch.autolog()}, \code{mlflow.xgboost.autolog()}). Con una única línea previa a \code{model.fit(...)}, MLflow intercepta las llamadas de entrenamiento y registra automáticamente todos los hiperparámetros del estimador, métricas estándar sobre el conjunto de entrenamiento, la firma inferida y el modelo serializado.
+
+Si bien el \textit{autologging} acelera enormemente la exploración inicial, en entornos productivos presenta dos riesgos importantes: (1)~puede registrar métricas únicamente sobre \textit{train} (p.~ej., \code{training\_accuracy\_score}), induciendo a evaluar sobreajuste por error si no se añade explícitamente validación; y (2)~puede disparar el volumen de almacenamiento al serializar automáticamente decenas de modelos intermedios durante validaciones cruzadas o ensayos descartados. La Tabla~\ref{tab:autolog-vs-manual} sintetiza cuándo elegir cada modalidad y destaca la \textbf{estrategia híbrida} recomendada en producción.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa entre Autologging, Tracking Manual y la estrategia híbrida en MLflow.}
+\label{tab:autolog-vs-manual}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.5cm} Y Y Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Criterio} &
+\textcolor{white}{\sffamily\bfseries Autologging puro} &
+\textcolor{white}{\sffamily\bfseries Tracking Manual} &
+\textcolor{white}{\sffamily\bfseries Estrategia Híbrida (recomendada)} \\
+\midrule
+Velocidad de instrumentación &
+Inmediata (1 línea de código). &
+Moderada (requiere código explícito). &
+Rápida con control fino. \\
+\rowcolor{TableStripe}
+Métricas de negocio y \textit{slices} &
+\nomark\ (solo métricas estándar del framework). &
+\yesmark\ (total flexibilidad: KPIs, costes, \textit{fairness}). &
+\yesmark\ (autolog captura base + manual registra negocio y holdout). \\
+Control de almacenamiento &
+Bajo (guarda modelos y artefactos en cada \code{fit}). &
+Total (solo serializa candidatos aprobados). &
+Alto desactivando guardado (\code{log\_models=False}). \\
+\rowcolor{TableStripe}
+Riesgo de ruido en UI &
+Alto en \textit{GridSearch}/CV sin filtrar. &
+Mínimo y estandarizado. &
+Bajo, manteniendo exhaustividad de parámetros. \\
+Escenario idóneo &
+Prototipado rápido en cuadernos y comparativas exploratorias. &
+Pipelines regulados, modelos custom y métricas propietarias. &
+Pipelines productivos de reentrenamiento con scikit-learn / XGBoost / PyTorch. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================================
+\section[MLflow Models, pyfunc y Projects]{Empaquetado reproducible: MLflow Models, \code{pyfunc}, Signatures y MLflow Projects}\label{sec:mlflow-models-projects}
+% ============================================================================
+
+\subsection{Anatomía de un MLflow Model y paradigma \textit{multi-flavor}}
+
+Un \textbf{MLflow Model} no es un simple fichero binario serializado, sino un \textbf{directorio autocontenido y reproducible} cuyo descriptor principal es el fichero YAML \code{MLmodel}. Junto al artefacto del modelo (p.~ej.\ \code{model.pkl}, pesos PyTorch o grafo ONNX), MLflow empaqueta los manifiestos exactos del entorno de ejecución (\code{python\_env.yaml}, \code{conda.yaml} y \code{requirements.txt}), la firma de entrada/salida y opcionalmente un fichero \code{input\_example.json}.
+
+Su diseño clave es el concepto de \textbf{\textit{flavors}} (sabores): un mismo directorio de modelo declara múltiples interfaces de carga. El flavor nativo (\code{sklearn}, \code{pytorch}, \code{xgboost}) conserva todos los métodos específicos del estimador (como \code{feature\_importances\_} o \code{predict\_proba}), mientras que el flavor universal \textbf{\code{python\_function} (\code{pyfunc})} expone una única interfaz estandarizada \code{predict(model\_input)} que cualquier herramienta de despliegue (MLflow Serving, Docker, KServe, Apache Spark UDF) sabe invocar sin conocer qué librería entrenó el modelo. El Listado~\ref{lst:mlmodel-yaml} muestra un descriptor \code{MLmodel} real completo.
+
+\begin{lstlisting}[style=yaml, caption={Ejemplo real de descriptor MLmodel con dos flavors (python\_function y sklearn), firma tipada y referencia a input\_example.}, label={lst:mlmodel-yaml}]
+artifact_path: random_forest_model
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.11.9
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.5.2
+mlflow_version: 2.19.0
+model_size_bytes: 184620
+model_uuid: 7b4e1d9a8c324a10b5f19e84d2c3a701
+run_id: 4f8a2c1e90ab4d3fb219c6a8d0e41b2c
+saved_input_example_info:
+  artifact_path: input_example.json
+  pandas_orient: split
+  serving_input_path: serving_input_example.json
+  type: dataframe
+signature:
+  inputs: '[{"type": "double", "name": "mean radius", "required": true},
+            {"type": "double", "name": "mean texture", "required": true},
+            {"type": "double", "name": "mean perimeter", "required": true}]'
+  outputs: '[{"type": "long", "name": "prediction", "required": true}]'
+  params: '[{"name": "threshold", "type": "double", "default": 0.5, "shape": null}]'
+utc_time_created: '2026-11-18 09:42:11.402198'
+\end{lstlisting}
+
+\subsection{Model Signatures e \code{input\_example}: contratos estrictos en inferencia}
+
+La \textbf{Model Signature} formaliza el contrato de interfaz del modelo especificando nombres, tipos, nulabilidad y formas (\textit{shapes}) tanto de las entradas (\code{inputs}) como de las salidas (\code{outputs}) y de los parámetros opcionales de inferencia (\code{params}, como el umbral de decisión o la temperatura de generación). MLflow soporta firmas basadas en columnas (para DataFrames tabulares) y firmas basadas en tensores NumPy (para imágenes, audio o secuencias).
+
+Proporcionar siempre la firma inferida (\code{infer\_signature}) junto con un lote de muestra (\code{input\_example}) al invocar \code{log\_model} aporta tres salvaguardas productivas inmediatas:
+\begin{enumerate}
+  \item \textbf{Validación automática en tiempo de servicio:} si un cliente envía una columna faltante, un nombre mal escrito o un tipo incompatible (p.~ej., un texto donde se espera un \code{double}), el servidor de inferencia rechaza la petición con un error HTTP~400 explícito en lugar de emitir una predicción silenciosamente corrupta.
+  \item \textbf{Prueba de humo (\textit{round-trip check}) al guardar:} al recibir \code{input\_example}, MLflow serializa el ejemplo a JSON, lo vuelve a deserializar y verifica que la inferencia ejecuta correctamente antes de dar por bueno el artefacto.
+  \item \textbf{Documentación ejecutable en la UI:} cualquier ingeniero puede copiar el payload exacto desde la interfaz de MLflow para probar el endpoint.
+\end{enumerate}
+
+\subsection{Modelos personalizados con el flavor \code{mlflow.pyfunc}}
+
+En sistemas productivos rara vez basta con invocar un estimador aislado de \pkg{scikit-learn}. Con frecuencia necesitamos encapsular lógica de preprocesamiento no estándar, aplicar un umbral óptimo de negocio $\tau^*$ calibrado por costes, enriquecer la predicción con una tabla de referencia externa o combinar varios modelos heterogéneos (por ejemplo, un promedio ponderado entre un LightGBM y una regresión logística calibrada).
+
+Heredar de \code{mlflow.pyfunc.PythonModel} permite empaquetar toda esa lógica bajo el contrato estándar de MLflow: el método \code{load\_context(self, context)} carga en memoria los artefactos auxiliares declarados en el diccionario \code{artifacts} una única vez al arrancar el servidor, y \code{predict(self, context, model\_input, params=None)} ejecuta la inferencia por lotes aceptando parámetros dinámicos validados por firma. El Listado~\ref{lst:mlflow-pyfunc-custom} muestra un ejemplo completo de ensemble con umbral parametrizable.
+
+\begin{lstlisting}[style=python, caption={Implementación y registro de un modelo personalizado con mlflow.pyfunc que combina dos modelos y aplica un umbral de decisión configurable.}, label={lst:mlflow-pyfunc-custom}]
+import joblib
+import mlflow
+import mlflow.pyfunc
+import numpy as np
+import pandas as pd
+from mlflow.models import infer_signature
+from mlflow.models.signature import ModelSignature
+from mlflow.types.schema import ParamSchema, ParamSpec
+
+
+class CalibratedThresholdEnsemble(mlflow.pyfunc.PythonModel):
+    """Combina probabilidades de un modelo lineal y uno de arboles con umbral dinamico."""
+
+    def load_context(self, context: mlflow.pyfunc.PythonModelContext) -> None:
+        self.rf_model = joblib.load(context.artifacts["rf_path"])
+        self.lr_pipeline = joblib.load(context.artifacts["lr_path"])
+
+    def predict(
+        self,
+        context: mlflow.pyfunc.PythonModelContext,
+        model_input: pd.DataFrame,
+        params: dict | None = None,
+    ) -> pd.DataFrame:
+        cfg = params or {}
+        threshold = float(cfg.get("threshold", 0.42))
+        rf_weight = float(cfg.get("rf_weight", 0.65))
+
+        p_rf = self.rf_model.predict_proba(model_input)[:, 1]
+        p_lr = self.lr_pipeline.predict_proba(model_input)[:, 1]
+        prob_ensemble = rf_weight * p_rf + (1.0 - rf_weight) * p_lr
+
+        return pd.DataFrame({
+            "probability": np.round(prob_ensemble, 6),
+            "decision": (prob_ensemble >= threshold).astype(int),
+        })
+
+
+# Registro del modelo personalizado junto a sus artefactos y firma con parametros
+def registrar_ensemble(rf_file: str, lr_file: str, x_sample: pd.DataFrame) -> None:
+    sample_output = pd.DataFrame({"probability": [0.81], "decision": [1]})
+    param_schema = ParamSchema([
+        ParamSpec("threshold", "double", 0.42),
+        ParamSpec("rf_weight", "double", 0.65),
+    ])
+    base_sig = infer_signature(x_sample.head(1), sample_output)
+    full_sig = ModelSignature(
+        inputs=base_sig.inputs, outputs=base_sig.outputs, params=param_schema
+    )
+
+    with mlflow.start_run(run_name="pyfunc_ensemble_v1"):
+        mlflow.pyfunc.log_model(
+            artifact_path="fraud_ensemble",
+            python_model=CalibratedThresholdEnsemble(),
+            artifacts={"rf_path": rf_file, "lr_path": lr_file},
+            signature=full_sig,
+            input_example=x_sample.head(2),
+            pip_requirements=["scikit-learn==1.5.2", "joblib==1.4.2", "pandas==2.2.3"],
+        )
+\end{lstlisting}
+
+\subsection{Reproducibilidad de código con MLflow Projects}
+
+Mientras que \textit{MLflow Models} estandariza la \textit{salida} del entrenamiento, \textbf{MLflow Projects} estandariza el \textit{código de entrada} que lo ejecuta. Un proyecto MLflow es un directorio o repositorio Git que contiene un descriptor \code{MLproject} (Listado~\ref{lst:mlproject-yaml}) definiendo el entorno aislado (\code{python\_env}, \code{conda\_env} o \code{docker\_env}) y uno o varios puntos de entrada tipados (\code{entry\_points}).
+
+\begin{lstlisting}[style=yaml, caption={Descriptor MLproject para ejecución reproducible y parametrizada desde CLI o Git.}, label={lst:mlproject-yaml}]
+name: breast_cancer_training_project
+
+python_env: python_env.yaml
+
+entry_points:
+  main:
+    parameters:
+      n_estimators: {type: int, default: 150}
+      max_depth: {type: int, default: 8}
+      random_state: {type: int, default: 42}
+    command: >
+      python train.py
+      --n_estimators {n_estimators}
+      --max_depth {max_depth}
+      --random_state {random_state}
+\end{lstlisting}
+
+Con este descriptor, cualquier ingeniero o pipeline remoto puede reproducir exactamente el entrenamiento directamente desde una rama o \textit{commit} de Git sin configurar entornos a mano:
+\begin{center}
+\code{mlflow run https://github.com/org/ml-repo.git\#src -v v1.4.0 -P n\_estimators=250}
+\end{center}
+En arquitecturas modernas nativas de la nube, muchos equipos complementan o sustituyen \code{MLproject} por imágenes Docker inmutables compiladas en CI y lanzadas por Airflow mediante \code{KubernetesPodOperator}; no obstante, el principio subyacente es idéntico: aislar entorno, fijar dependencias y parametrizar la ejecución.
+
+% ============================================================================
+\section[Model Registry: Aliases y Tags]{MLflow Model Registry moderno: de \textit{Stages} deprecados a \textit{Aliases} y \textit{Tags}}\label{sec:mlflow-registry}
+% ============================================================================
+
+\subsection{Transición arquitectónica: por qué los \textit{Stages} quedaron obsoletos}
+
+Una vez que un entrenamiento supera las pruebas de validación, el artefacto se promueve al \textbf{Model Registry} como una nueva versión numérica inmutable (\code{Version 1}, \code{Version 2}, \dots) bajo un nombre lógico (p.~ej.\ \code{breast\_cancer\_classifier}).
+
+Históricamente (hasta MLflow 2.8, tal como se mostraba en la diapositiva~78 de la presentación original), el ciclo de vida en el Registry se gestionaba mediante cuatro \textbf{\textit{Stages}} fijos: \code{None}, \code{Staging}, \code{Production} y \code{Archived}. Aunque intuitivo en ejemplos sencillos, este modelo rígido presentaba graves limitaciones en organizaciones reales:
+\begin{itemize}
+  \item \textbf{Confundía estado de despliegue con estado de aprobación:} pasar a \code{Production} significaba simultáneamente «aprobado por auditoría» y «sirviendo tráfico», impidiendo separar la validación de gobierno del despliegue técnico.
+  \item \textbf{Imposibilitaba múltiples destinos concurrentes:} no permitía etiquetar simultáneamente un modelo principal, un candidato en prueba \textit{shadow}, un experimento A/B o variantes regionales (\code{@eu\_west}, \code{@us\_east}).
+  \item \textbf{Nombres fijos no extensibles:} obligaba a encajar cualquier flujo corporativo (QA, Pre-prod, Canary, Disaster Recovery) en tres únicas etiquetas.
+\end{itemize}
+
+\begin{modernbox}[Modernización 2024--2026: \textit{Aliases} y \textit{Tags} sustituyen a \textit{Stages}]
+\badge[AmberAccent]{Deprecado} Desde \textbf{MLflow 2.9+} el método \code{transition\_model\_version\_stage()} está oficialmente deprecado y ha sido eliminado en \textbf{MLflow 3}. El estándar moderno separa claramente dos conceptos ortogonales:
+\begin{enumerate}
+  \item \textbf{\textit{Aliases} (\code{@champion}, \code{@challenger}, \code{@shadow}, \code{@production}):} punteros mutables y con nombre libre que apuntan en cada instante a una única \code{ModelVersion}. Mover el alias \code{@champion} de la v4 a la v5 es una operación atómica, y revertir un incidente (\textit{rollback}) se reduce a reasignar \code{@champion} a la v4.
+  \item \textbf{\textit{Model Version Tags} de gobierno:} pares clave-valor que documentan metadatos de validación y auditoría sin interferir con el enrutamiento (\code{validation\_status=passed}, \code{fairness\_audit=ok}, \code{approved\_by=ml-lead}, \code{training\_data\_sha=...}).
+\end{enumerate}
+\end{modernbox}
+
+El Listado~\ref{lst:mlflow-registry-aliases} contrapone ambos enfoques en código ejecutable, ilustrando el flujo completo moderno con \code{MlflowClient}.
+
+\begin{lstlisting}[style=python, caption={Flujo completo de registro y promoción: contraste entre Stages (deprecado) y el enfoque moderno con Aliases y Tags de gobernanza.}, label={lst:mlflow-registry-aliases}]
+import mlflow
+from mlflow import MlflowClient
+
+MODEL_NAME = "breast_cancer_classifier"
+RUN_ID = "4f8a2c1e90ab4d3fb219c6a8d0e41b2c"
+client = MlflowClient()
+
+# 1. Registrar el artefacto entrenado -> crea la siguiente version inmutable (vN)
+mv = mlflow.register_model(
+    model_uri=f"runs:/{RUN_ID}/random_forest_model",
+    name=MODEL_NAME,
+)
+new_version = mv.version
+
+# --- ENFOQUE LEGADO (DEPRECADO desde MLflow 2.9+, eliminado en MLflow 3) ---
+# client.transition_model_version_stage(
+#     name=MODEL_NAME, version=new_version, stage="Staging"
+# )
+# client.transition_model_version_stage(
+#     name=MODEL_NAME, version=new_version, stage="Production",
+#     archive_existing_versions=True,
+# )
+
+# --- ENFOQUE MODERNO (MLflow 2.9+ y MLflow 3): Tags + Aliases ---
+# 2. Adjuntar trazabilidad y metadatos de gobernanza sobre la version
+client.update_model_version(
+    name=MODEL_NAME,
+    version=new_version,
+    description="RandomForest optimizado con Optuna TPE (25 trials, StratifiedKFold=5).",
+)
+governance_tags = {
+    "validation_status": "passed",
+    "fairness_check": "passed",
+    "holdout_f1": "0.9642",
+    "dataset_snapshot": "dvc:a91c4f2",
+    "approved_by": "ci-mlops-gate",
+}
+for k, v in governance_tags.items():
+    client.set_model_version_tag(name=MODEL_NAME, version=new_version, key=k, value=v)
+
+# 3. Asignar primero como candidato (@challenger) para pruebas shadow/canary
+client.set_registered_model_alias(
+    name=MODEL_NAME, alias="challenger", version=new_version
+)
+
+# 4. Tras superar pruebas online, conservar respaldo y promover atomicamente a @champion
+try:
+    prev_champion = client.get_model_version_by_alias(MODEL_NAME, "champion")
+    client.set_registered_model_alias(
+        name=MODEL_NAME, alias="previous_champion", version=prev_champion.version
+    )
+except mlflow.exceptions.RestException:
+    pass  # Primera promocion: no existe champion previo
+
+client.set_registered_model_alias(
+    name=MODEL_NAME, alias="champion", version=new_version
+)
+client.delete_registered_model_alias(name=MODEL_NAME, alias="challenger")
+\end{lstlisting}
+
+\subsection{Carga desacoplada por URI y la entidad \code{LoggedModel} en MLflow 3}
+
+Gracias a los alias, las aplicaciones consumidoras y los DAGs de inferencia \textit{batch} permanecen completamente desacoplados del número de versión física:
+\begin{center}
+\code{model = mlflow.pyfunc.load\_model("models:/breast\_cancer\_classifier@champion")}
+\end{center}
+Cuando el equipo de MLOps promueve la versión~12 al alias \code{@champion} ---o ejecuta un \textit{rollback} inmediato hacia \code{@previous\_champion}--- el servicio de inferencia incorpora el cambio al recargar su caché o reiniciar el despliegue sin modificar ni redesplegar una sola línea de código de aplicación.
+
+Finalmente, conviene destacar una mejora arquitectónica introducida por \textbf{MLflow 3} \badge[PrimaryAccent]{MLflow 3}: la entidad \textbf{\code{LoggedModel}}. En MLflow 2.x, un modelo existía exclusivamente como un subdirectorio de artefactos atado a la \textit{run} de entrenamiento que lo creó; si semanas después evaluábamos ese mismo modelo contra un nuevo conjunto de pruebas de estrés, un benchmark de equidad o un lote de datos de producción con \textit{drift}, esas métricas nuevas quedaban dispersas en \textit{runs} inconexas. En MLflow 3, cada modelo registrado posee su propio identificador de primera clase (\code{model\_id}, accesible vía \code{models:/m-<model\_id>}) y agrega bajo una vista unificada todas las métricas, trazas y evaluaciones generadas por múltiples \textit{runs} a lo largo de su vida operativa.
+
+% ============================================================================
+\section[Serving, despliegue progresivo y CI/CD]{Serving, estrategias de despliegue progresivo y CI/CD para ML}\label{sec:mlflow-serving-cicd}
+% ============================================================================
+
+\subsection{Serving local, empaquetado Docker y plataformas a escala}
+
+MLflow proporciona herramientas de línea de comandos para pasar en segundos del Registry a un endpoint HTTP operativo o a una imagen de contenedor lista para producción. El servidor local (\code{mlflow models serve}) levanta un servicio REST con dos rutas principales: \code{GET /ping} (comprobación de salud para sondas \textit{liveness/readiness}) y \code{POST /invocations} (inferencia). El endpoint \code{/invocations} acepta varios formatos JSON estandarizados:
+\begin{itemize}
+  \item \code{dataframe\_split} (recomendado en modelos tabulares por preservar explícitamente el nombre y orden de columnas con bajo sobrecoste): \code{\{"dataframe\_split": \{"columns": [...], "data": [[...]]\}\}}.
+  \item \code{dataframe\_records}: lista de diccionarios JSON \code{[\{"col\_a": 1.2, ...\}]} muy legible para integraciones web.
+  \item \code{inputs} o \code{instances}: orientados a tensores NumPy y modelos de \textit{Deep Learning} (compatible además con el esquema de TensorFlow Serving).
+\end{itemize}
+
+El Listado~\ref{lst:mlflow-serving-curl} ilustra el arranque del servicio apuntando al alias \code{@champion}, una llamada de inferencia con \code{curl} y la construcción de una imagen Docker inmutable lista para subir a un registro corporativo y desplegar en Kubernetes.
+
+\begin{lstlisting}[style=bash, caption={Servicio local desde Model Registry con alias @champion, invocación REST y construcción de imagen Docker.}, label={lst:mlflow-serving-curl}]
+# 1. Servir localmente el modelo referenciado por alias (sustituye al legado /Production)
+export MLFLOW_TRACKING_URI="http://localhost:5000"
+mlflow models serve \
+  -m "models:/breast_cancer_classifier@champion" \
+  -p 5001 \
+  --env-manager local
+
+# 2. Invocar el endpoint /invocations (payload dataframe_split + params opcionales)
+curl -s -X POST http://127.0.0.1:5001/invocations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataframe_split": {
+      "columns": ["mean radius", "mean texture", "mean perimeter"],
+      "data": [[14.2, 19.6, 92.4], [20.1, 23.8, 131.2]]
+    }
+  }'
+
+# 3. Empaquetar una imagen Docker autocontenida para despliegue en Kubernetes / Cloud
+mlflow models build-docker \
+  -m "models:/breast_cancer_classifier@champion" \
+  -n "registry.corp.internal/ml/breast-cancer-clf:2026.11"
+\end{lstlisting}
+
+Mientras que \code{mlflow models serve} y las imágenes Docker generadas son idóneas para cargas bajas o medias, las organizaciones con requisitos estrictos de SLA, autoescalado a cero (\textit{scale-to-zero}), multiplexación de GPUs y enrutamiento de tráfico despliegan estos contenedores sobre plataformas especializadas de \textit{serving}: \textbf{KServe} o \textbf{Seldon Core} sobre Kubernetes (integrados con Istio/Knative), \textbf{AWS SageMaker Endpoints}, \textbf{Google Vertex AI} o \textbf{Databricks Model Serving}.
+
+\subsection{Estrategias de despliegue progresivo}
+
+Publicar la primera versión de un modelo es relativamente sencillo; sustituir una versión madura (v37) que autoriza millones de euros diarios en transacciones exige mitigar el riesgo mediante técnicas de \textbf{despliegue progresivo}. La Figura~\ref{fig:estrategias-despliegue} representa el enrutamiento de tráfico en las cuatro estrategias fundamentales, y la Tabla~\ref{tab:estrategias-despliegue} compara sus compromisos operativos.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  gw/.style={
+    darkbox, minimum width=2.2cm, minimum height=0.92cm, text width=2.0cm, font=\sffamily\scriptsize\bfseries
+  },
+  m_old/.style={
+    archbox, minimum width=2.55cm, minimum height=0.72cm, text width=2.4cm, font=\sffamily\scriptsize\bfseries
+  },
+  m_new/.style={
+    tealbox, minimum width=2.55cm, minimum height=0.72cm, text width=2.4cm, font=\sffamily\scriptsize\bfseries
+  },
+  ptitle/.style={
+    font=\sffamily\footnotesize\bfseries, text=PrimaryDark, anchor=west
+  }
+]
+  % --------------------------------------------------------------------------
+  % 1. SHADOW DEPLOYMENT (arriba izquierda)
+  % --------------------------------------------------------------------------
+  \begin{scope}[shift={(0, 4.35)}]
+    \draw[LightBorder, rounded corners=5pt, fill=SoftBg] (-0.3, -0.45) rectangle (9.35, 3.35);
+    \node[ptitle] at (0.0, 2.98) {1. Shadow Deployment (Dark Launch)};
+
+    \node[gw] (gw1) at (1.1, 1.35) {API Gateway\\(Mirroring)};
+    \node[m_old] (v1_1) at (5.55, 2.08) {v1 (@champion)};
+    \node[m_new] (v2_1) at (5.55, 0.58) {v2 (@shadow)};
+    \node[subbox, text width=1.55cm] (usr1) at (8.35, 2.08) {Respuesta\\al cliente};
+    \node[subbox, draw=TealAccent, text width=1.55cm] (log1) at (8.35, 0.58) {Logs y\\comparativa};
+
+    \draw[flowarrow] (gw1.east) -- ++(0.35,0) |- (v1_1.west)
+      node[elabel, pos=0.75, above=2pt] {100\%};
+    \draw[dashedarrow, color=TealAccent] (gw1.east) -- ++(0.35,0) |- (v2_1.west)
+      node[elabel, pos=0.75, below=2pt] {Copia async};
+    \draw[flowarrow] (v1_1) -- (usr1);
+    \draw[dashedarrow, color=TealAccent] (v2_1) -- (log1);
+  \end{scope}
+
+  % --------------------------------------------------------------------------
+  % 2. CANARY RELEASE (arriba derecha)
+  % --------------------------------------------------------------------------
+  \begin{scope}[shift={(9.95, 4.35)}]
+    \draw[LightBorder, rounded corners=5pt, fill=SoftBg] (-0.3, -0.45) rectangle (9.35, 3.35);
+    \node[ptitle] at (0.0, 2.98) {2. Canary Release (Progresivo)};
+
+    \node[gw] (gw2) at (1.1, 1.35) {Ingress /\\Istio Router};
+    \node[m_old] (v1_2) at (5.55, 2.08) {v1 (@champion)};
+    \node[m_new] (v2_2) at (5.55, 0.58) {v2 (@canary)};
+    \node[subbox, text width=1.55cm] (usr2) at (8.35, 1.35) {Clientes\\(100\%)};
+
+    \draw[flowarrow] (gw2.east) -- ++(0.35,0) |- (v1_2.west)
+      node[elabel, pos=0.75, above=2pt] {95\% $\rightarrow$ 0\%};
+    \draw[tealarrow] (gw2.east) -- ++(0.35,0) |- (v2_2.west)
+      node[elabel, pos=0.75, below=2pt] {5\% $\rightarrow$ 100\%};
+    \draw[flowarrow] (v1_2.east) -| (usr2.north);
+    \draw[tealarrow] (v2_2.east) -| (usr2.south);
+  \end{scope}
+
+  % --------------------------------------------------------------------------
+  % 3. A/B TESTING (abajo izquierda)
+  % --------------------------------------------------------------------------
+  \begin{scope}[shift={(0, 0)}]
+    \draw[LightBorder, rounded corners=5pt, fill=SoftBg] (-0.3, -0.45) rectangle (9.35, 3.35);
+    \node[ptitle] at (0.0, 2.98) {3. A/B Testing (Experimento de negocio)};
+
+    \node[gw] (gw3) at (1.1, 1.35) {Feature Flag\\Hash(user\_id)};
+    \node[m_old] (v1_3) at (5.55, 2.08) {Variante A (v1)};
+    \node[m_new] (v2_3) at (5.55, 0.58) {Variante B (v2)};
+    \node[subbox, draw=AmberAccent, text width=1.65cm] (kpi3) at (8.32, 1.35) {Test estadístico\\KPI negocio};
+
+    \draw[flowarrow] (gw3.east) -- ++(0.35,0) |- (v1_3.west)
+      node[elabel, pos=0.75, above=2pt] {Cohorte A (50\%)};
+    \draw[tealarrow] (gw3.east) -- ++(0.35,0) |- (v2_3.west)
+      node[elabel, pos=0.75, below=2pt] {Cohorte B (50\%)};
+    \draw[flowarrow] (v1_3.east) -| (kpi3.north);
+    \draw[tealarrow] (v2_3.east) -| (kpi3.south);
+  \end{scope}
+
+  % --------------------------------------------------------------------------
+  % 4. BLUE / GREEN (abajo derecha)
+  % --------------------------------------------------------------------------
+  \begin{scope}[shift={(9.95, 0)}]
+    \draw[LightBorder, rounded corners=5pt, fill=SoftBg] (-0.3, -0.45) rectangle (9.35, 3.35);
+    \node[ptitle] at (0.0, 2.98) {4. Blue/Green (Conmutación atómica)};
+
+    \node[gw] (gw4) at (1.1, 1.35) {Load Balancer\\(Switch DNS)};
+    \node[m_old] (v1_4) at (5.55, 2.08) {Entorno Blue (v1)};
+    \node[m_new] (v2_4) at (5.55, 0.58) {Entorno Green (v2)};
+    \node[subbox, draw=CrimsonAccent, text width=1.55cm] (rb4) at (8.35, 1.35) {Rollback\\instantáneo};
+
+    \draw[dashedarrow] (gw4.east) -- ++(0.35,0) |- (v1_4.west)
+      node[elabel, pos=0.75, above=2pt] {Standby (0\%)};
+    \draw[tealarrow, line width=1.3pt] (gw4.east) -- ++(0.35,0) |- (v2_4.west)
+      node[elabel, pos=0.75, below=2pt] {Activo (100\%)};
+    \draw[dashedarrow, color=CrimsonAccent] (rb4.north) |- (v1_4.east);
+    \draw[tealarrow] (v2_4.east) -| (rb4.south);
+  \end{scope}
+\end{tikzpicture}%
+}
+\caption{Patrones de enrutamiento de tráfico en las cuatro estrategias de despliegue progresivo de modelos en producción.}
+\label{fig:estrategias-despliegue}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Comparativa técnica y operativa de las estrategias de despliegue progresivo.}
+\label{tab:estrategias-despliegue}
+\small
+\begin{tabularx}{\textwidth}{@{}L{2.2cm} C{1.7cm} C{1.7cm} C{1.7cm} C{1.8cm} Y@{}}
+\toprule
+\rowcolor{TableHeaderBg}
+\textcolor{white}{\sffamily\bfseries Estrategia} &
+\textcolor{white}{\sffamily\bfseries Riesgo al usuario} &
+\textcolor{white}{\sffamily\bfseries Coste infra extra} &
+\textcolor{white}{\sffamily\bfseries Mide KPI negocio} &
+\textcolor{white}{\sffamily\bfseries Velocidad rollback} &
+\textcolor{white}{\sffamily\bfseries Cuándo utilizarla} \\
+\midrule
+Shadow Deployment &
+Nulo (0\% expuesto) &
+Alto ($2\times$ cómputo) &
+\nomark\ (solo latencia y discrepancia) &
+No requiere (no sirve) &
+Validar cambios de arquitectura drásticos, latencia real y estabilidad bajo tráfico real sin riesgo. \\
+\rowcolor{TableStripe}
+Canary Release &
+Muy bajo (acotado al \% inicial) &
+Bajo (réplicas graduales) &
+\partialmark\ (sesgo si muestra pequeña) &
+Segundos (ajustar pesos) &
+Sustitución rutinaria de versiones del modelo mitigando regresiones operacionales y caídas de SLA. \\
+A/B Testing &
+Moderado (cohorte expuesta) &
+Moderado &
+\yesmark\ (con potencia estadística) &
+Segundos (apagar \textit{flag}) &
+Medir impacto causal en negocio (conversión, ingresos, retención) con asignación determinista por usuario. \\
+\rowcolor{TableStripe}
+Blue/Green &
+Alto si falla al conmutar 100\% &
+Alto ($2\times$ temporal) &
+\partialmark\ (antes vs.\ después) &
+Instantáneo (conmutar LB) &
+Entornos donde no pueden convivir dos versiones simultáneas (p.~ej.\ contratos de API incompatibles o batch). \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+En sistemas críticos suelen encadenarse secuencialmente: una nueva arquitectura pasa primero 48 horas en \textbf{Shadow} para certificar latencia p99 y ausencia de excepciones con datos reales; después entra en \textbf{Canary} (1\% $\rightarrow$ 10\% $\rightarrow$ 25\%) monitorizando tasas de error y alertas de deriva; y finalmente compite en un \textbf{A/B Test} con asignación consistente por \code{hash(user\_id)} y tamaño muestral calculado previamente para validar si mejora de forma estadísticamente significativa el KPI económico.
+
+\subsection{CI/CD/CT para Machine Learning y automatización de calidad}
+
+Aplicar integración y despliegue continuos (CI/CD) al aprendizaje automático extiende la pirámide tradicional de pruebas de software a una \textbf{pirámide de pruebas de tres capas específicas de ML}:
+
+\begin{enumerate}
+  \item \textbf{Pruebas de código y determinismo (rápidas, en cada \textit{commit}):} análisis estático (\pkg{ruff}, \pkg{mypy}) y pruebas unitarias con \pkg{pytest} que verifican funciones de ingeniería de características, invariantes matemáticos (p.~ej.\ que las probabilidades sumen 1, que el preprocesamiento sea idempotente) y una prueba rápida de sobreajuste sobre un mini-lote sintético (\textit{overfit one batch}) para asegurar que el bucle de entrenamiento converge.
+  \item \textbf{Pruebas de datos:} validación automática de contratos de esquema, rangos, nulabilidad y ausencia de deriva catastrófica sobre el \textit{snapshot} de entrenamiento mediante Pandera o Great Expectations, junto con versionado reproducible de datos usando \textbf{DVC} (archivos puntero \code{.dvc} en Git respaldados por S3/GCS) o \textbf{LakeFS} (operaciones tipo Git ---\code{branch}, \code{commit}, \code{merge}--- sin duplicar ficheros sobre Data Lakes).
+  \item \textbf{Pruebas de modelo y no-regresión (antes de promover):} el modelo candidato debe superar simultáneamente: (a)~umbrales mínimos absolutos en el conjunto de prueba sellado, (b)~una \textbf{prueba de no-regresión} frente al modelo \code{@champion} vigente sobre el mismo conjunto de evaluación, (c)~pruebas de equidad por subpoblaciones (\textit{sliced evaluation}) y perturbación direccional, y (d)~un presupuesto máximo de latencia de inferencia (p.~ej.\ p99 $< 25\text{ ms}$) y tamaño de artefacto.
+\end{enumerate}
+
+El Listado~\ref{lst:github-actions-mlops} presenta un flujo de trabajo completo en \textbf{GitHub Actions} que materializa esta pirámide, entrena y registra contra un servidor MLflow remoto, evalúa las compuertas de calidad para asignar el alias \code{@challenger} o \code{@champion} y publica un resumen comparativo directamente en la \textit{Pull Request}.
+
+\begin{lstlisting}[style=yaml, caption={Workflow productivo de GitHub Actions para CI/CD de ML: pruebas de código y datos, entrenamiento en MLflow, validación challenger-vs-champion y reporte en PR.}, label={lst:github-actions-mlops}]
+name: mlops-ci-cd-pipeline
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  MLFLOW_TRACKING_TOKEN: ${{ secrets.MLFLOW_TRACKING_TOKEN }}
+  MODEL_NAME: "breast_cancer_classifier"
+
+jobs:
+  code-and-data-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Linting, tipado y tests unitarios de codigo
+        run: |
+          ruff check src/ tests/
+          pytest tests/unit/ -v --cov=src
+      - name: Descargar snapshot de datos (DVC) y validar contrato
+        run: |
+          dvc pull data/training_snapshot.parquet.dvc
+          python src/validate_data_contract.py --path data/training_snapshot.parquet
+
+  train-validate-promote:
+    needs: code-and-data-quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Entrenar y registrar ejecucion en MLflow remoto
+        id: train
+        run: |
+          RUN_ID=$(python src/train.py --git-sha "${GITHUB_SHA}" --output-run-id)
+          echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+      - name: Evaluar umbrales, fairness, latencia y comparar contra @champion
+        run: |
+          python src/validate_and_promote.py \
+            --run-id "${{ steps.train.outputs.run_id }}" \
+            --model-name "${MODEL_NAME}" \
+            --min-f1 0.92 \
+            --max-p99-ms 25.0 \
+            --promote-alias "${{ github.ref == 'refs/heads/main' && 'challenger' || '' }}" \
+            --report-md evaluation_report.md
+      - name: Publicar informe comparativo en el resumen del Job y PR
+        if: always()
+        run: cat evaluation_report.md >> "$GITHUB_STEP_SUMMARY"
+\end{lstlisting}
+
+\begin{examplebox}[¿Promoción automática o aprobación humana (\textit{Human-in-the-Loop})?]
+Una decisión de gobierno crucial en todo pipeline CI/CD/CT consiste en decidir hasta qué punto automatizar la reasignación del alias \code{@champion}. No existe una única respuesta correcta: la regla de ingeniería consiste en graduar la autonomía según el \textbf{riesgo de negocio, la velocidad del bucle de feedback y el marco regulatorio}.
+\begin{itemize}
+  \item \textbf{Promoción totalmente automática (CT puro):} apropiada para modelos de recomendación de contenido, ordenación de búsquedas o previsión de inventario con miles de ítems, donde el coste de un error puntual es acotado, las métricas reales llegan en horas y el modelo requiere reentrenarse diariamente para seguir patrones rápidos.
+  \item \textbf{Aprobación humana obligatoria (compuerta manual):} imprescindible en sistemas de alto impacto ---concesión de crédito, precios de seguros, cribado médico o sistemas clasificados de alto riesgo bajo el \textit{EU AI Act}---. En estos casos, el pipeline CI/CD automatiza el entrenamiento, registra el modelo como \code{@challenger}, adjunta etiquetas verificadas de \textit{fairness} y genera un informe de explicabilidad, deteniendo el flujo en un entorno protegido de GitHub Actions (\code{environment: production-approval}) hasta que un responsable técnico o de riesgo revise el informe y apruebe el paso a \code{@champion}.
+\end{itemize}
+\end{examplebox}
+
+Con el dominio de MLflow Clásico hemos completado la caja de herramientas estándar para el aprendizaje automático predictivo tradicional. Sin embargo, el despliegue de aplicaciones basadas en Grandes Modelos de Lenguaje (LLMs), arquitecturas RAG y agentes autónomos plantea desafíos cualitativamente nuevos: los \textit{prompts} reemplazan parcialmente a los pesos como unidad de iteración rápida, las salidas en lenguaje natural no admiten métricas simples como exactitud o RMSE, y una única respuesta puede involucrar múltiples llamadas encadenadas a herramientas y bases vectoriales. En los dos próximos capítulos descubriremos cómo \textbf{MLflow 3} extiende exactamente estos mismos principios de rigor científico hacia el universo de \textbf{Prompt Engineering y LLMOps}.
